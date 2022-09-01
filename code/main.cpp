@@ -38,6 +38,17 @@ typedef s64						bool64;
 
 global_variable bool IsRunning;
 
+struct swapchain
+{
+	VkSwapchainKHR Handle;
+
+	std::vector<VkImage> Images;
+	std::vector<VkImageView> ImageViews;
+	std::vector<VkFramebuffer> Framebuffers;
+
+	u32 Width, Height;
+};
+
 
 internal void
 DispatchMessages()
@@ -191,8 +202,39 @@ CreateDevice(const VkPhysicalDevice& PhysicalDevice, u32* FamilyIndex)
 	return Device;
 }
 
+internal VkFramebuffer
+CreateFramebuffer(VkDevice Device, VkRenderPass RenderPass, VkImageView View, u32 Width, u32 Height)
+{
+	VkFramebufferCreateInfo FramebufferCreateInfo = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+	FramebufferCreateInfo.pAttachments = &View;
+	FramebufferCreateInfo.attachmentCount = 1;
+	FramebufferCreateInfo.width = Width;
+	FramebufferCreateInfo.height = Height;
+	FramebufferCreateInfo.renderPass = RenderPass;
+	FramebufferCreateInfo.layers = 1;
+	VkFramebuffer Result = 0;
+	vkCreateFramebuffer(Device, &FramebufferCreateInfo, 0, &Result);
+	return Result;
+}
+
+internal VkImageView
+CreateImageView(VkDevice Device, VkImage Image, VkFormat Format)
+{
+	VkImageViewCreateInfo CreateInfo = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+	CreateInfo.format = Format;
+	CreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	CreateInfo.image = Image;
+	CreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	CreateInfo.subresourceRange.layerCount = 1;
+	CreateInfo.subresourceRange.levelCount = 1;
+
+	VkImageView Result = 0;
+	vkCreateImageView(Device, &CreateInfo, 0, &Result);
+	return Result;
+}
+
 internal VkSwapchainKHR
-CreateSwapchain(VkDevice Device, VkSurfaceKHR Surface, VkSurfaceFormatKHR SurfaceFormat, VkSurfaceCapabilitiesKHR SurfaceCaps, u32 Width, u32 Height, u32* FamilyIndex)
+CreateSwapchain(VkDevice Device, VkSurfaceKHR Surface, VkSurfaceFormatKHR SurfaceFormat, VkSurfaceCapabilitiesKHR SurfaceCaps, u32 Width, u32 Height, u32* FamilyIndex, VkSwapchainKHR OldSwapchain = 0)
 {
 	VkCompositeAlphaFlagBitsKHR CompositeAlpha = 
 		(SurfaceCaps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR :
@@ -214,9 +256,74 @@ CreateSwapchain(VkDevice Device, VkSurfaceKHR Surface, VkSurfaceFormatKHR Surfac
 	SwapchainCreateInfo.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
 	SwapchainCreateInfo.compositeAlpha = CompositeAlpha;
 	SwapchainCreateInfo.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+	SwapchainCreateInfo.oldSwapchain = OldSwapchain;
 	VkSwapchainKHR Swapchain = 0;
 	VK_CHECK(vkCreateSwapchainKHR(Device, &SwapchainCreateInfo, 0, &Swapchain));
 	return Swapchain;
+}
+
+internal void
+CreateSwapchain(swapchain& Swapchain, VkRenderPass RenderPass, VkDevice Device, VkSurfaceKHR Surface, VkSurfaceFormatKHR SurfaceFormat, VkSurfaceCapabilitiesKHR SurfaceCaps, u32 Width, u32 Height, u32* FamilyIndex, VkSwapchainKHR OldSwapchain = 0)
+{
+	Swapchain.Handle = CreateSwapchain(Device, Surface, SurfaceFormat, SurfaceCaps, Width, Height, FamilyIndex, OldSwapchain);
+	Swapchain.Width  = Width;
+	Swapchain.Height = Height;
+
+	u32 SwapchainImageCount = 0;
+	vkGetSwapchainImagesKHR(Device, Swapchain.Handle, &SwapchainImageCount, 0);
+	std::vector<VkImage> SwapchainImages(SwapchainImageCount);
+	vkGetSwapchainImagesKHR(Device, Swapchain.Handle, &SwapchainImageCount, SwapchainImages.data());
+	Swapchain.Images = std::move(SwapchainImages);
+
+	std::vector<VkImageView> SwapchainImageViews(SwapchainImageCount);
+	for(u32 ImageViewIndex = 0;
+		ImageViewIndex < SwapchainImageViews.size();
+		++ImageViewIndex)
+	{
+		SwapchainImageViews[ImageViewIndex] = CreateImageView(Device, Swapchain.Images[ImageViewIndex], SurfaceFormat.format);
+		assert(SwapchainImageViews[ImageViewIndex]);
+	}
+	Swapchain.ImageViews = std::move(SwapchainImageViews);
+
+	std::vector<VkFramebuffer> Framebuffers(SwapchainImageCount);
+	for(u32 FramebufferIndex = 0;
+		FramebufferIndex < Framebuffers.size();
+		++FramebufferIndex)
+	{
+		Framebuffers[FramebufferIndex] = CreateFramebuffer(Device, RenderPass, Swapchain.ImageViews[FramebufferIndex], Width, Height);
+		assert(Framebuffers[FramebufferIndex]);
+	}
+	Swapchain.Framebuffers = std::move(Framebuffers);
+}
+
+internal void
+DestroySwapchain(const swapchain& Swapchain, VkDevice Device)
+{
+	for(u32 FramebufferIndex = 0;
+		FramebufferIndex < Swapchain.Framebuffers.size();
+		++FramebufferIndex)
+	{
+		vkDestroyFramebuffer(Device, Swapchain.Framebuffers[FramebufferIndex], 0);
+	}
+
+	for(u32 ImageViewIndex = 0;
+		ImageViewIndex < Swapchain.ImageViews.size();
+		++ImageViewIndex)
+	{
+		vkDestroyImageView(Device, Swapchain.ImageViews[ImageViewIndex], 0);
+	}
+
+	vkDestroySwapchainKHR(Device, Swapchain.Handle, 0);
+}
+
+internal void 
+ResizeSwapchain(swapchain& Result, VkRenderPass RenderPass, VkDevice Device, VkSurfaceKHR Surface, VkSurfaceFormatKHR SurfaceFormat, VkSurfaceCapabilitiesKHR SurfaceCaps, u32 Width, u32 Height, u32* FamilyIndex)
+{
+	VkSwapchainKHR OldSwapchain = Result.Handle;
+	swapchain Old = Result;
+	CreateSwapchain(Result, RenderPass, Device, Surface, SurfaceFormat, SurfaceCaps, Width, Height, FamilyIndex, OldSwapchain);
+	VK_CHECK(vkDeviceWaitIdle(Device));
+	DestroySwapchain(Old, Device);
 }
 
 internal VkRenderPass
@@ -246,37 +353,6 @@ CreateRenderPass(VkDevice Device, VkFormat Format)
 	RenderPassCreateInfo.attachmentCount = 1;
 	VkRenderPass Result = 0;
 	vkCreateRenderPass(Device, &RenderPassCreateInfo, 0, &Result);
-	return Result;
-}
-
-internal VkFramebuffer
-CreateFramebuffer(VkDevice Device, VkRenderPass RenderPass, VkImageView View, u32 Width, u32 Height)
-{
-	VkFramebufferCreateInfo FramebufferCreateInfo = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-	FramebufferCreateInfo.pAttachments = &View;
-	FramebufferCreateInfo.attachmentCount = 1;
-	FramebufferCreateInfo.width = Width;
-	FramebufferCreateInfo.height = Height;
-	FramebufferCreateInfo.renderPass = RenderPass;
-	FramebufferCreateInfo.layers = 1;
-	VkFramebuffer Result = 0;
-	vkCreateFramebuffer(Device, &FramebufferCreateInfo, 0, &Result);
-	return Result;
-}
-
-internal VkImageView
-CreateImageView(VkDevice Device, VkImage Image, VkFormat Format)
-{
-	VkImageViewCreateInfo CreateInfo = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-	CreateInfo.format = Format;
-	CreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-	CreateInfo.image = Image;
-	CreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	CreateInfo.subresourceRange.layerCount = 1;
-	CreateInfo.subresourceRange.levelCount = 1;
-
-	VkImageView Result = 0;
-	vkCreateImageView(Device, &CreateInfo, 0, &Result);
 	return Result;
 }
 
@@ -559,9 +635,6 @@ WinMain(HINSTANCE CurrInst,
 
 	VkSurfaceFormatKHR SurfaceFormat = GetSwapchainFormat(PhysicalDevice, Surface);
 
-	VkSwapchainKHR Swapchain = CreateSwapchain(Device, Surface, SurfaceFormat, SurfaceCaps, ClientWidth, ClientHeight, &FamilyIndex);
-	assert(Swapchain);
-
 	VkSemaphore AcquireSemaphore = CreateSemaphore(Device);
 	assert(AcquireSemaphore);
 	VkSemaphore ReleaseSemaphore = CreateSemaphore(Device);
@@ -576,30 +649,10 @@ WinMain(HINSTANCE CurrInst,
 	VkShaderModule TriangleFragmentShader = LoadShader(Device, "..\\shaders\\triangle.frag.spv");
 	assert(TriangleFragmentShader);
 
-	u32 SwapchainImageCount = 0;
-	vkGetSwapchainImagesKHR(Device, Swapchain, &SwapchainImageCount, 0);
-	std::vector<VkImage> SwapchainImages(SwapchainImageCount);
-	vkGetSwapchainImagesKHR(Device, Swapchain, &SwapchainImageCount, SwapchainImages.data());
-
-	std::vector<VkImageView> SwapchainImageViews(SwapchainImageCount);
-	for(u32 ImageViewIndex = 0;
-		ImageViewIndex < SwapchainImageViews.size();
-		++ImageViewIndex)
-	{
-		SwapchainImageViews[ImageViewIndex] = CreateImageView(Device, SwapchainImages[ImageViewIndex], SurfaceFormat.format);
-		assert(SwapchainImageViews[ImageViewIndex]);
-	}
-
 	VkRenderPass RenderPass = CreateRenderPass(Device, SurfaceFormat.format);
 	assert(RenderPass);
-	std::vector<VkFramebuffer> Framebuffers(SwapchainImageCount);
-	for(u32 FramebufferIndex = 0;
-		FramebufferIndex < Framebuffers.size();
-		++FramebufferIndex)
-	{
-		Framebuffers[FramebufferIndex] = CreateFramebuffer(Device, RenderPass, SwapchainImageViews[FramebufferIndex], ClientWidth, ClientHeight);
-		assert(Framebuffers[FramebufferIndex]);
-	}
+	swapchain Swapchain;
+	CreateSwapchain(Swapchain, RenderPass, Device, Surface, SurfaceFormat, SurfaceCaps, ClientWidth, ClientHeight, &FamilyIndex);
 
 	VkPipelineCache PipelineCache = 0;
 	VkPipelineLayout PipelineLayout = CreatePipelineLayout(Device);
@@ -624,8 +677,15 @@ WinMain(HINSTANCE CurrInst,
 	{
 		DispatchMessages();
 
+		VkSurfaceCapabilitiesKHR ResizeCaps;
+		VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(PhysicalDevice, Surface, &ResizeCaps));
+		if(ResizeCaps.currentExtent.width != Swapchain.Width || ResizeCaps.currentExtent.height != Swapchain.Height)
+		{
+			ResizeSwapchain(Swapchain, RenderPass, Device, Surface, SurfaceFormat, SurfaceCaps, ResizeCaps.currentExtent.width, ResizeCaps.currentExtent.height, &FamilyIndex);
+		}
+
 		u32 ImageIndex = 0;
-		VK_CHECK(vkAcquireNextImageKHR(Device, Swapchain, ~0ull, AcquireSemaphore, VK_NULL_HANDLE, &ImageIndex));
+		VK_CHECK(vkAcquireNextImageKHR(Device, Swapchain.Handle, ~0ull, AcquireSemaphore, VK_NULL_HANDLE, &ImageIndex));
 
 		VK_CHECK(vkResetCommandPool(Device, CommandPool, 0));
 
@@ -633,22 +693,22 @@ WinMain(HINSTANCE CurrInst,
 		CommandBufferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 		vkBeginCommandBuffer(CommandBuffer, &CommandBufferBeginInfo);
 
-		PipelineBarrierImage(CommandBuffer, SwapchainImages[ImageIndex], VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+		PipelineBarrierImage(CommandBuffer, Swapchain.Images[ImageIndex], VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
 		VkClearValue ClearColor = {};
 		ClearColor.color = {48./255., 25/255., 86/255., 1};
 
 		VkRenderPassBeginInfo RenderPassBeginInfo = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-		RenderPassBeginInfo.framebuffer = Framebuffers[ImageIndex];
+		RenderPassBeginInfo.framebuffer = Swapchain.Framebuffers[ImageIndex];
 		RenderPassBeginInfo.renderPass = RenderPass;
-		RenderPassBeginInfo.renderArea.extent.width = ClientWidth;
-		RenderPassBeginInfo.renderArea.extent.height = ClientHeight;
+		RenderPassBeginInfo.renderArea.extent.width = Swapchain.Width;
+		RenderPassBeginInfo.renderArea.extent.height = Swapchain.Height;
 		RenderPassBeginInfo.clearValueCount = 1;
 		RenderPassBeginInfo.pClearValues = &ClearColor;
 		vkCmdBeginRenderPass(CommandBuffer, &RenderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-		VkViewport Viewport = {0, (float)ClientHeight, (float)ClientWidth, -(float)ClientHeight, 0, 1};
-		VkRect2D Scissor = {{0, 0}, {ClientWidth, ClientHeight}};
+		VkViewport Viewport = {0, (float)Swapchain.Height, (float)Swapchain.Width, -(float)Swapchain.Height, 0, 1};
+		VkRect2D Scissor = {{0, 0}, {Swapchain.Width, Swapchain.Height}};
 		vkCmdSetViewport(CommandBuffer, 0, 1, &Viewport);
 		vkCmdSetScissor(CommandBuffer, 0, 1, &Scissor);
 
@@ -656,7 +716,7 @@ WinMain(HINSTANCE CurrInst,
 		vkCmdDraw(CommandBuffer, 3, 1, 0, 0);
 
 		vkCmdEndRenderPass(CommandBuffer);
-		PipelineBarrierImage(CommandBuffer, SwapchainImages[ImageIndex], VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+		PipelineBarrierImage(CommandBuffer, Swapchain.Images[ImageIndex], VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 		vkEndCommandBuffer(CommandBuffer);
 
 		VkPipelineStageFlags SubmitStageFlag = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -674,7 +734,7 @@ WinMain(HINSTANCE CurrInst,
 		PresentInfo.waitSemaphoreCount = 1;
 		PresentInfo.pWaitSemaphores = &ReleaseSemaphore;
 		PresentInfo.swapchainCount = 1;
-		PresentInfo.pSwapchains = &Swapchain;
+		PresentInfo.pSwapchains = &Swapchain.Handle;
 		PresentInfo.pImageIndices = &ImageIndex;
 		vkQueuePresentKHR(Queue, &PresentInfo);
 
@@ -683,20 +743,9 @@ WinMain(HINSTANCE CurrInst,
 
 	vkDestroyCommandPool(Device, CommandPool, 0);
 
-	for(u32 FramebufferIndex = 0;
-		FramebufferIndex < Framebuffers.size();
-		++FramebufferIndex)
-	{
-		vkDestroyFramebuffer(Device, Framebuffers[FramebufferIndex], 0);
-	}
+	DestroySwapchain(Swapchain, Device);
 
 	vkDestroyRenderPass(Device, RenderPass, 0);
-	for(u32 ImageViewIndex = 0;
-		ImageViewIndex < SwapchainImageViews.size();
-		++ImageViewIndex)
-	{
-		vkDestroyImageView(Device, SwapchainImageViews[ImageViewIndex], 0);
-	}
 
 	vkDestroyPipeline(Device, TrianglePipeline, 0);
 	vkDestroyPipelineLayout(Device, PipelineLayout, 0);
@@ -707,7 +756,6 @@ WinMain(HINSTANCE CurrInst,
 	vkDestroySemaphore(Device, AcquireSemaphore, 0);
 	vkDestroySemaphore(Device, ReleaseSemaphore, 0);
 
-	vkDestroySwapchainKHR(Device, Swapchain, 0);
 	vkDestroySurfaceKHR(Instance, Surface, 0);
 	vkDestroyDevice(Device, 0);
 	vkDestroyDebugReportCallbackEXT(Instance, Callback, 0);

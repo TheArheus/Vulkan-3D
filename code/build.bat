@@ -12,7 +12,7 @@ set CommonLinkFlags=-opt:ref -incremental:no /SUBSYSTEM:console /LIBPATH:%Vulkan
 
 if not exist ..\build\ mkdir ..\build\
 pushd ..\build\
-dxc.exe -spirv -T vs_6_0 -E main ..\shaders\triangle.vert.hlsl -Fo ..\shaders\triangle.vert.spv
-dxc.exe -spirv -T ps_6_0 -E main ..\shaders\triangle.frag.hlsl -Fo ..\shaders\triangle.frag.spv
+C:\DirectXShaderCompiler.bin\Debug\bin\dxc.exe -spirv -T vs_6_0 -E main ..\shaders\triangle.vert.hlsl -Fo ..\shaders\triangle.vert.spv
+C:\DirectXShaderCompiler.bin\Debug\bin\dxc.exe -spirv -T ps_6_0 -E main ..\shaders\triangle.frag.hlsl -Fo ..\shaders\triangle.frag.spv
 cl %CommonCompFlags% user32.lib kernel32.lib vulkan-1.lib ..\code\main.cpp %OneFile% /link %CommonLinkFlags%
 popd
