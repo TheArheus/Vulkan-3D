@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 #include <vector>
 #include <windows.h>
 #define VK_NO_PROTOTYPES
@@ -8,6 +9,24 @@
 #include <vulkan/vulkan_win32.h>
 #include <Volk/volk.h>
 #include <Volk/volk.c>
+
+#include "meshoptimizer/meshoptimizer.h"
+#include "meshoptimizer/allocator.cpp"
+#include "meshoptimizer/clusterizer.cpp"
+#include "meshoptimizer/indexcodec.cpp"
+#include "meshoptimizer/indexgenerator.cpp"
+#include "meshoptimizer/overdrawanalyzer.cpp"
+#include "meshoptimizer/overdrawoptimizer.cpp"
+#include "meshoptimizer/simplifier.cpp"
+#include "meshoptimizer/spatialorder.cpp"
+#include "meshoptimizer/vcacheanalyzer.cpp"
+#include "meshoptimizer/vcacheoptimizer.cpp"
+#include "meshoptimizer/vertexcodec.cpp"
+#include "meshoptimizer/vertexfilter.cpp"
+#include "meshoptimizer/vfetchanalyzer.cpp"
+#include "meshoptimizer/vfetchoptimizer.cpp"
+#include "objparser.h"
+#include "objparser.cpp"
 
 #include <io.h>
 #include <fcntl.h>
@@ -35,7 +54,7 @@ typedef s64						bool64;
 		assert(CallResult == VK_SUCCESS); \
 	} while(0);
 
-
+#include "mesh_loader.h"
 global_variable bool IsRunning;
 
 struct swapchain
@@ -49,6 +68,69 @@ struct swapchain
 	u32 Width, Height;
 };
 
+struct buffer
+{
+	VkBuffer Handle;
+	VkDeviceMemory Memory;
+	void* Data;
+	size_t Size;
+};
+
+struct vertex
+{
+	float vx, vy, vz;
+	float nx, ny, nz;
+	float tu, tv;
+};
+
+struct mesh
+{
+	std::vector<vertex> Vertices;
+	std::vector<u32> Indices;
+};
+
+internal bool
+LoadMesh(mesh& Result, const char* Path)
+{
+	ObjFile File;
+	if(!objParseFile(File, Path))
+	{
+		return false;
+	}
+	size_t IndexCount = File.f_size / 3;
+	std::vector<vertex> Vertices(IndexCount);
+
+	for(u32 VertexIndex = 0;
+		VertexIndex < IndexCount;
+		++VertexIndex)
+	{
+		vertex& V = Vertices[VertexIndex];
+
+		int VIndex = File.f[VertexIndex * 3 + 0];
+		int VTextureIndex = File.f[VertexIndex * 3 + 1];
+		int VNormalIndex = File.f[VertexIndex * 3 + 2];
+
+		V.vx = File.v[VIndex * 3 + 0];
+		V.vy = File.v[VIndex * 3 + 1];
+		V.vz = File.v[VIndex * 3 + 2];
+		V.nx = VNormalIndex < 0 ? 0.f : File.vn[VNormalIndex * 3 + 0];
+		V.ny = VNormalIndex < 0 ? 0.f : File.vn[VNormalIndex * 3 + 1];
+		V.nz = VNormalIndex < 0 ? 0.f : File.vn[VNormalIndex * 3 + 2];
+		V.tu = VTextureIndex < 0 ? 0.f : File.vt[VTextureIndex * 3 + 0];
+		V.tv = VTextureIndex < 0 ? 0.f : File.vt[VTextureIndex * 3 + 1];
+	}
+
+	std::vector<u32> Remap(IndexCount);
+	size_t VertexCount = meshopt_generateVertexRemap(Remap.data(), 0, IndexCount, Vertices.data(), IndexCount, sizeof(vertex));
+
+	Result.Vertices.resize(VertexCount);
+	Result.Indices.resize(IndexCount);
+
+	meshopt_remapVertexBuffer(Result.Vertices.data(), Vertices.data(), IndexCount, sizeof(vertex), Remap.data());
+	meshopt_remapIndexBuffer(Result.Indices.data(), 0, IndexCount, Remap.data());
+
+	return true;
+}
 
 internal void
 DispatchMessages()
@@ -464,12 +546,28 @@ CreateGraphicsPipeline(VkDevice Device, VkPipelineCache PipelineCache, VkPipelin
 	Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
 	Stages[1].pName = "main";
 
+	VkVertexInputBindingDescription Stream = {0, 8 * 4, VK_VERTEX_INPUT_RATE_VERTEX};
+	VkVertexInputAttributeDescription Attrs[3] = {};
+	Attrs[0].location = 0;
+	Attrs[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+	Attrs[0].offset = 0;
+	Attrs[1].location = 1;
+	Attrs[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+	Attrs[1].offset = 12;
+	Attrs[2].location = 2;
+	Attrs[2].format = VK_FORMAT_R32G32_SFLOAT;
+	Attrs[2].offset = 24;
+
 	CreateInfo.layout = PipelineLayout;
 	CreateInfo.renderPass = RenderPass;
 	CreateInfo.pStages = Stages;
 	CreateInfo.stageCount = 2;
 
 	VkPipelineVertexInputStateCreateInfo VertexInputState = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+	VertexInputState.vertexBindingDescriptionCount = 1;
+	VertexInputState.pVertexBindingDescriptions = &Stream;
+	VertexInputState.vertexAttributeDescriptionCount = 3;
+	VertexInputState.pVertexAttributeDescriptions = Attrs;
 
 	VkPipelineInputAssemblyStateCreateInfo InputAssemblyState = {VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
 	InputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -548,6 +646,52 @@ GetSwapchainFormat(VkPhysicalDevice PhysicalDevice, VkSurfaceKHR Surface)
 	return Result;
 }
 
+u32 SelectMemoryType(const VkPhysicalDeviceMemoryProperties& MemoryProperties, u32 MemoryTypeBits, VkMemoryPropertyFlags Flags)
+{
+	for(u32 PropertyIndex = 0;
+		PropertyIndex < MemoryProperties.memoryTypeCount;
+		++PropertyIndex)
+	{
+		if((MemoryTypeBits & (1 << PropertyIndex)) != 0 && (MemoryProperties.memoryTypes[PropertyIndex].propertyFlags & Flags) == Flags)
+		{
+			return PropertyIndex;
+		}
+	}
+
+	return ~0u;
+}
+
+internal void
+CreateBuffer(buffer& Buffer, VkDevice Device, const VkPhysicalDeviceMemoryProperties& MemoryProperties, size_t Size, VkBufferUsageFlags Usage)
+{
+	VkBufferCreateInfo CreateInfo = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+	CreateInfo.usage = Usage;
+	CreateInfo.size = Size;
+	VK_CHECK(vkCreateBuffer(Device, &CreateInfo, 0, &Buffer.Handle));
+
+	VkMemoryRequirements Requirements;
+	vkGetBufferMemoryRequirements(Device, Buffer.Handle, &Requirements);
+
+	u32 MemoryTypeIndex = SelectMemoryType(MemoryProperties, Requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+	assert(MemoryTypeIndex != ~0u);
+
+	VkMemoryAllocateInfo AllocateInfo = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+	AllocateInfo.memoryTypeIndex = MemoryTypeIndex;
+	AllocateInfo.allocationSize = Requirements.size;
+	VK_CHECK(vkAllocateMemory(Device, &AllocateInfo, 0, &Buffer.Memory));
+
+	vkBindBufferMemory(Device, Buffer.Handle, Buffer.Memory, 0);
+
+	VK_CHECK(vkMapMemory(Device, Buffer.Memory, 0, Size, 0, &Buffer.Data));
+}
+
+internal void
+DestroyBuffer(buffer& Buffer, VkDevice Device)
+{
+	vkFreeMemory(Device, Buffer.Memory, 0);
+	vkDestroyBuffer(Device, Buffer.Handle, 0);
+}
+
 internal void
 PipelineBarrierImage(VkCommandBuffer CommandBuffer, VkImage Image, 
 					 VkPipelineStageFlags SrcStageMask, VkPipelineStageFlags DstStageMask, 
@@ -601,6 +745,13 @@ WinMain(HINSTANCE CurrInst,
 	GetClientRect(Window, &ClientRect);
 	u32 ClientWidth = ClientRect.right - ClientRect.left;
 	u32 ClientHeight = ClientRect.bottom - ClientRect.top;
+
+	mesh Mesh;
+	bool IsMeshLoaded = LoadMesh(Mesh, "..\\assets\\kitten.obj");
+	if(!IsMeshLoaded)
+	{
+		printf("Couldn't load kitten mesh!\n");
+	}
 
 	VK_CHECK(volkInitialize());
 	VkInstance Instance = CreateInstance(ClassName);
@@ -673,6 +824,16 @@ WinMain(HINSTANCE CurrInst,
 	VkCommandBuffer CommandBuffer = 0;
 	vkAllocateCommandBuffers(Device, &CommandBufferAllocateInfo, &CommandBuffer);
 
+	VkPhysicalDeviceMemoryProperties MemoryProperties;
+	vkGetPhysicalDeviceMemoryProperties(PhysicalDevice, &MemoryProperties);
+
+	buffer VertexBuffer = {}, IndexBuffer = {};
+	CreateBuffer(VertexBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+	memcpy(VertexBuffer.Data, Mesh.Vertices.data(), sizeof(vertex) * Mesh.Vertices.size());
+
+	CreateBuffer(IndexBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+	memcpy(IndexBuffer.Data, Mesh.Indices.data(), sizeof(u32) * Mesh.Indices.size());
+
 	while(IsRunning)
 	{
 		DispatchMessages();
@@ -713,7 +874,11 @@ WinMain(HINSTANCE CurrInst,
 		vkCmdSetScissor(CommandBuffer, 0, 1, &Scissor);
 
 		vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, TrianglePipeline);
-		vkCmdDraw(CommandBuffer, 3, 1, 0, 0);
+
+		VkDeviceSize Offset = 0;
+		vkCmdBindVertexBuffers(CommandBuffer, 0, 1, &VertexBuffer.Handle, &Offset);
+		vkCmdBindIndexBuffer(CommandBuffer, IndexBuffer.Handle, 0, VK_INDEX_TYPE_UINT32);
+		vkCmdDrawIndexed(CommandBuffer, Mesh.Indices.size(), 1, 0, 0, 0);
 
 		vkCmdEndRenderPass(CommandBuffer);
 		PipelineBarrierImage(CommandBuffer, Swapchain.Images[ImageIndex], VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
@@ -740,6 +905,9 @@ WinMain(HINSTANCE CurrInst,
 
 		vkDeviceWaitIdle(Device);
 	}
+
+	DestroyBuffer(VertexBuffer, Device);
+	DestroyBuffer(IndexBuffer, Device);
 
 	vkDestroyCommandPool(Device, CommandPool, 0);
 
