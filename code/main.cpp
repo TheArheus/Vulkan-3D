@@ -259,6 +259,7 @@ CreateDevice(const VkPhysicalDevice& PhysicalDevice, u32* FamilyIndex)
 	std::vector<const char*> Extensions = 
 	{
 		VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+		VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
 	};
 
 	std::vector<const char*> Layers = 
@@ -271,6 +272,9 @@ CreateDevice(const VkPhysicalDevice& PhysicalDevice, u32* FamilyIndex)
 	QueueCreateInfo.queueCount = 1;
 	QueueCreateInfo.pQueuePriorities = QueuePriorities;
 
+	VkPhysicalDeviceFeatures Feature = {};
+	Feature.vertexPipelineStoresAndAtomics = true;
+
 	VkDeviceCreateInfo DeviceCreateInfo = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
 	DeviceCreateInfo.ppEnabledExtensionNames = Extensions.data();
 	DeviceCreateInfo.enabledExtensionCount = (u32)Extensions.size();
@@ -278,6 +282,7 @@ CreateDevice(const VkPhysicalDevice& PhysicalDevice, u32* FamilyIndex)
 	DeviceCreateInfo.enabledLayerCount = (u32)Layers.size();
 	DeviceCreateInfo.queueCreateInfoCount = 1;
 	DeviceCreateInfo.pQueueCreateInfos = &QueueCreateInfo;
+	DeviceCreateInfo.pEnabledFeatures = &Feature;
 	VkDevice Device = 0;
 	VK_CHECK(vkCreateDevice(PhysicalDevice, &DeviceCreateInfo, 0, &Device));
 
@@ -524,10 +529,29 @@ LoadShader(VkDevice Device, const char* Path)
 internal VkPipelineLayout
 CreatePipelineLayout(VkDevice Device)
 {
+	VkDescriptorSetLayoutBinding SetBindings[1] = {};
+	SetBindings[0].binding = 0;
+	SetBindings[0].descriptorCount = 1;
+	SetBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	SetBindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+	VkDescriptorSetLayoutCreateInfo DescriptorSetLayoutCreateInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; 
+	DescriptorSetLayoutCreateInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+	DescriptorSetLayoutCreateInfo.bindingCount = 1;
+	DescriptorSetLayoutCreateInfo.pBindings = SetBindings;
+
+	VkDescriptorSetLayout DescriptorSetLayout = 0;
+	VK_CHECK(vkCreateDescriptorSetLayout(Device, &DescriptorSetLayoutCreateInfo, 0, &DescriptorSetLayout));
+
 	VkPipelineLayoutCreateInfo CreateInfo = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+	CreateInfo.pSetLayouts = &DescriptorSetLayout;
+	CreateInfo.setLayoutCount = 1;
 
 	VkPipelineLayout Result = 0;
 	VK_CHECK(vkCreatePipelineLayout(Device, &CreateInfo, 0, &Result));
+
+	//vkDestroyDescriptorSetLayout(Device, DescriptorSetLayout, 0);
+
 	return Result;
 }
 
@@ -546,28 +570,12 @@ CreateGraphicsPipeline(VkDevice Device, VkPipelineCache PipelineCache, VkPipelin
 	Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
 	Stages[1].pName = "main";
 
-	VkVertexInputBindingDescription Stream = {0, 8 * 4, VK_VERTEX_INPUT_RATE_VERTEX};
-	VkVertexInputAttributeDescription Attrs[3] = {};
-	Attrs[0].location = 0;
-	Attrs[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-	Attrs[0].offset = 0;
-	Attrs[1].location = 1;
-	Attrs[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-	Attrs[1].offset = 12;
-	Attrs[2].location = 2;
-	Attrs[2].format = VK_FORMAT_R32G32_SFLOAT;
-	Attrs[2].offset = 24;
-
 	CreateInfo.layout = PipelineLayout;
 	CreateInfo.renderPass = RenderPass;
 	CreateInfo.pStages = Stages;
 	CreateInfo.stageCount = 2;
 
 	VkPipelineVertexInputStateCreateInfo VertexInputState = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-	VertexInputState.vertexBindingDescriptionCount = 1;
-	VertexInputState.pVertexBindingDescriptions = &Stream;
-	VertexInputState.vertexAttributeDescriptionCount = 3;
-	VertexInputState.pVertexAttributeDescriptions = Attrs;
 
 	VkPipelineInputAssemblyStateCreateInfo InputAssemblyState = {VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
 	InputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -668,6 +676,7 @@ CreateBuffer(buffer& Buffer, VkDevice Device, const VkPhysicalDeviceMemoryProper
 	CreateInfo.usage = Usage;
 	CreateInfo.size = Size;
 	VK_CHECK(vkCreateBuffer(Device, &CreateInfo, 0, &Buffer.Handle));
+	Buffer.Size = Size;
 
 	VkMemoryRequirements Requirements;
 	vkGetBufferMemoryRequirements(Device, Buffer.Handle, &Requirements);
@@ -806,8 +815,8 @@ WinMain(HINSTANCE CurrInst,
 	CreateSwapchain(Swapchain, RenderPass, Device, Surface, SurfaceFormat, SurfaceCaps, ClientWidth, ClientHeight, &FamilyIndex);
 
 	VkPipelineCache PipelineCache = 0;
-	VkPipelineLayout PipelineLayout = CreatePipelineLayout(Device);
-	VkPipeline TrianglePipeline = CreateGraphicsPipeline(Device, PipelineCache, PipelineLayout, RenderPass, TriangleVertexShader, TriangleFragmentShader);
+	VkPipelineLayout TriangleLayout = CreatePipelineLayout(Device);
+	VkPipeline TrianglePipeline = CreateGraphicsPipeline(Device, PipelineCache, TriangleLayout, RenderPass, TriangleVertexShader, TriangleFragmentShader);
 	assert(TrianglePipeline);
 
 	VkCommandPoolCreateInfo CommandPoolCreateInfo = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
@@ -828,10 +837,10 @@ WinMain(HINSTANCE CurrInst,
 	vkGetPhysicalDeviceMemoryProperties(PhysicalDevice, &MemoryProperties);
 
 	buffer VertexBuffer = {}, IndexBuffer = {};
-	CreateBuffer(VertexBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+	CreateBuffer(VertexBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 	memcpy(VertexBuffer.Data, Mesh.Vertices.data(), sizeof(vertex) * Mesh.Vertices.size());
 
-	CreateBuffer(IndexBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+	CreateBuffer(IndexBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 	memcpy(IndexBuffer.Data, Mesh.Indices.data(), sizeof(u32) * Mesh.Indices.size());
 
 	while(IsRunning)
@@ -875,8 +884,19 @@ WinMain(HINSTANCE CurrInst,
 
 		vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, TrianglePipeline);
 
-		VkDeviceSize Offset = 0;
-		vkCmdBindVertexBuffers(CommandBuffer, 0, 1, &VertexBuffer.Handle, &Offset);
+		VkDescriptorBufferInfo BufferInfo = {};
+		BufferInfo.buffer = VertexBuffer.Handle;
+		BufferInfo.offset = 0;
+		BufferInfo.range = VertexBuffer.Size;
+
+		VkWriteDescriptorSet DescriptorSets[1] = {};
+		DescriptorSets[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		DescriptorSets[0].dstBinding = 0;
+		DescriptorSets[0].descriptorCount = 1;
+		DescriptorSets[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		DescriptorSets[0].pBufferInfo = &BufferInfo;
+
+		vkCmdPushDescriptorSetKHR(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, TriangleLayout, 0, 1, DescriptorSets);
 		vkCmdBindIndexBuffer(CommandBuffer, IndexBuffer.Handle, 0, VK_INDEX_TYPE_UINT32);
 		vkCmdDrawIndexed(CommandBuffer, Mesh.Indices.size(), 1, 0, 0, 0);
 
@@ -916,7 +936,7 @@ WinMain(HINSTANCE CurrInst,
 	vkDestroyRenderPass(Device, RenderPass, 0);
 
 	vkDestroyPipeline(Device, TrianglePipeline, 0);
-	vkDestroyPipelineLayout(Device, PipelineLayout, 0);
+	vkDestroyPipelineLayout(Device, TriangleLayout, 0);
 
 	vkDestroyShaderModule(Device, TriangleFragmentShader, 0);
 	vkDestroyShaderModule(Device, TriangleVertexShader, 0);
