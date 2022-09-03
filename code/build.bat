@@ -7,12 +7,13 @@ set VulkanInc="%VULKAN_SDK%\Include"
 set VulkanLib="%VULKAN_SDK%\Lib"
 
 set OneFile=/Fe"VulkanEngine" /Fd"VulkanEngine" 
-set CommonCompFlags=-nologo -fp:fast -MTd -EHa- -Od -Oi -WX- -W4 -GR- -Gm- -GS -FC -Z7 -D_MBCS -D_DEBUG=1 -wd4100 -wd4530 -D_CRT_SECURE_NO_WARNINGS -DENABLE_SPIRV_CODEGEN=ON /I%VulkanInc%
+set CommonCompFlags=-nologo -fp:fast -MTd -EHa- -Od -Oi -WX- -W4 -GR- -Gm- -GS -FC -Z7 -D_MBCS -D_DEBUG=1 -wd4100 -wd4530 -DIsRtxSupported=1 -D_CRT_SECURE_NO_WARNINGS -DENABLE_SPIRV_CODEGEN=ON /I%VulkanInc%
 set CommonLinkFlags=-opt:ref -incremental:no /SUBSYSTEM:console /LIBPATH:%VulkanLib%
 
 if not exist ..\build\ mkdir ..\build\
 pushd ..\build\
-C:\DirectXShaderCompiler.bin\Debug\bin\dxc.exe -spirv -T vs_6_0 -E main ..\shaders\triangle.vert.hlsl -Fo ..\shaders\triangle.vert.spv
-C:\DirectXShaderCompiler.bin\Debug\bin\dxc.exe -spirv -T ps_6_0 -E main ..\shaders\triangle.frag.hlsl -Fo ..\shaders\triangle.frag.spv
+C:\DirectXShaderCompiler.bin\Debug\bin\dxc.exe -spirv -T vs_6_6 -E main ..\shaders\object.vert.hlsl -Fo ..\shaders\object.vert.spv -enable-16bit-types -fspv-target-env=vulkan1.2 -fspv-extension=SPV_KHR_16bit_storage
+C:\DirectXShaderCompiler.bin\Debug\bin\dxc.exe -spirv -T ps_6_6 -E main ..\shaders\object.frag.hlsl -Fo ..\shaders\object.frag.spv -enable-16bit-types -fspv-target-env=vulkan1.2
+C:\DirectXShaderCompiler.bin\Debug\bin\dxc.exe -spirv -T ms_6_6 -E main ..\shaders\object.mesh.hlsl -Fo ..\shaders\object.mesh.spv -enable-16bit-types -fspv-target-env=vulkan1.2 -fspv-extension=SPV_NV_mesh_shader -fspv-extension=SPV_KHR_16bit_storage
 cl %CommonCompFlags% user32.lib kernel32.lib vulkan-1.lib ..\code\main.cpp %OneFile% /link %CommonLinkFlags%
 popd

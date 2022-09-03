@@ -10,6 +10,7 @@
 #include <Volk/volk.h>
 #include <Volk/volk.c>
 
+// NOTE: remove this if possible
 #include "meshoptimizer/meshoptimizer.h"
 #include "meshoptimizer/allocator.cpp"
 #include "meshoptimizer/clusterizer.cpp"
@@ -25,6 +26,7 @@
 #include "meshoptimizer/vertexfilter.cpp"
 #include "meshoptimizer/vfetchanalyzer.cpp"
 #include "meshoptimizer/vfetchoptimizer.cpp"
+
 #include "objparser.h"
 #include "objparser.cpp"
 
@@ -47,6 +49,8 @@ typedef s64						bool64;
 #define internal static
 #define global_variable static
 #define local_persist static
+
+#define ArraySize(Arr) (sizeof(Arr) / sizeof(Arr[0]))
 
 #define VK_CHECK(call) \
 	do { \
@@ -83,10 +87,21 @@ struct vertex
 	float tu, tv;
 };
 
+// NOTE: Unfortunatly I am using 16 bit data instead of 8 bit data 
+// as hlsl is not support 8 bit data;
+struct meshlet
+{
+	u32 Vertices[64];
+	u32 Indices[126]; 
+	u32 TriangleCount;
+	u32 VertexCount;
+};
+
 struct mesh
 {
 	std::vector<vertex> Vertices;
 	std::vector<u32> Indices;
+	std::vector<meshlet> Meshlets;
 };
 
 internal bool
@@ -113,9 +128,13 @@ LoadMesh(mesh& Result, const char* Path)
 		V.vx = File.v[VIndex * 3 + 0];
 		V.vy = File.v[VIndex * 3 + 1];
 		V.vz = File.v[VIndex * 3 + 2];
+
 		V.nx = VNormalIndex < 0 ? 0.f : File.vn[VNormalIndex * 3 + 0];
 		V.ny = VNormalIndex < 0 ? 0.f : File.vn[VNormalIndex * 3 + 1];
 		V.nz = VNormalIndex < 0 ? 0.f : File.vn[VNormalIndex * 3 + 2];
+
+		//V.norm = ((u8)(nx * 127 + 127) << 24) | ((u8)(ny * 127 + 127) << 16) | ((u8)(nz * 127 + 127) << 8) | 0;
+
 		V.tu = VTextureIndex < 0 ? 0.f : File.vt[VTextureIndex * 3 + 0];
 		V.tv = VTextureIndex < 0 ? 0.f : File.vt[VTextureIndex * 3 + 1];
 	}
@@ -130,6 +149,67 @@ LoadMesh(mesh& Result, const char* Path)
 	meshopt_remapIndexBuffer(Result.Indices.data(), 0, IndexCount, Remap.data());
 
 	return true;
+}
+
+internal void
+BuildMeshlets(mesh& Mesh)
+{
+	meshlet Meshlet = {};
+	std::vector<u32> MeshletVertices(Mesh.Vertices.size(), -1);
+
+	for(size_t TriangleIndex = 0;
+		TriangleIndex < Mesh.Indices.size(); 
+		TriangleIndex += 3)
+	{
+		u32 a = Mesh.Indices[TriangleIndex + 0];
+		u32 b = Mesh.Indices[TriangleIndex + 1];
+		u32 c = Mesh.Indices[TriangleIndex + 2];
+
+		// NOTE: This is not optimal as it is using a lot of space
+		// try to use atleast 16 bit data
+		u32& VertexA = MeshletVertices[a];
+		u32& VertexB = MeshletVertices[b];
+		u32& VertexC = MeshletVertices[c];
+
+		if((Meshlet.VertexCount + (VertexA == -1) + (VertexB == -1) + (VertexC == -1) > 64) || (Meshlet.TriangleCount >= 126))
+		{
+			Mesh.Meshlets.push_back(Meshlet);
+			for (size_t InnerIndex = 0; InnerIndex < Meshlet.VertexCount; InnerIndex++) 
+			{
+				MeshletVertices[Meshlet.Vertices[InnerIndex]] = -1;
+			}
+			Meshlet = {};
+			
+		}
+
+		if(VertexA == -1)
+		{
+			VertexA = Meshlet.VertexCount;
+			Meshlet.Vertices[Meshlet.VertexCount++] = a;
+		}
+
+		if(VertexB == -1)
+		{
+			VertexB = Meshlet.VertexCount;
+			Meshlet.Vertices[Meshlet.VertexCount++] = b;
+		}
+
+		if(VertexC == -1)
+		{
+			VertexC = Meshlet.VertexCount;
+			Meshlet.Vertices[Meshlet.VertexCount++] = c;
+		}
+
+		Meshlet.Indices[Meshlet.TriangleCount*3+0] = VertexA;
+		Meshlet.Indices[Meshlet.TriangleCount*3+1] = VertexB;
+		Meshlet.Indices[Meshlet.TriangleCount*3+2] = VertexC;
+		Meshlet.TriangleCount++;
+	}
+
+	if(Meshlet.TriangleCount)
+	{
+		Mesh.Meshlets.push_back(Meshlet);
+	}
 }
 
 internal void
@@ -154,31 +234,6 @@ DispatchMessages()
 			} break;
 		}
 	}
-}
-
-void AttachToConsole()
-{
-	BOOL Created = AllocConsole();
-	if(!Created) return;
-
-	AttachConsole(ATTACH_PARENT_PROCESS);
-	HANDLE ConsoleHandleInp = GetStdHandle(STD_INPUT_HANDLE);
-	int FileHandle0 = _open_osfhandle((intptr_t)ConsoleHandleInp, _O_TEXT);
-	FILE* fd0 = _fdopen(FileHandle0, "w");
-	*stdout = *fd0;
-	setvbuf(stdout, NULL, _IONBF, 0);
-
-	HANDLE ConsoleHandleOut = GetStdHandle(STD_OUTPUT_HANDLE);
-	int FileHandle1 = _open_osfhandle((intptr_t)ConsoleHandleOut, _O_TEXT);
-	FILE* fd1 = _fdopen(FileHandle1, "r");
-	*stdout = *fd1;
-	setvbuf(stdin, NULL, _IONBF, 0);
-
-	HANDLE ConsoleHandleErr = GetStdHandle(STD_ERROR_HANDLE);
-	int FileHandle2 = _open_osfhandle((intptr_t)ConsoleHandleErr, _O_TEXT);
-	FILE* fd2 = _fdopen(FileHandle2, "w");
-	*stdout = *fd2;
-	setvbuf(stderr, NULL, _IONBF, 0);
 }
 
 VkBool32 DebugReportCallback(VkDebugReportFlagsEXT Flags, VkDebugReportObjectTypeEXT ObjectType, u64 Object, size_t Location, s32 MessageCode, const char* pLayerPrefix, const char* pMessage, void* pUserData)
@@ -214,6 +269,7 @@ CreateInstance(const char* ClassName)
 		VK_KHR_SURFACE_EXTENSION_NAME,
 		VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
 		VK_EXT_DEBUG_REPORT_EXTENSION_NAME,
+		VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
 	};
 
 	VkInstanceCreateInfo InstanceCreateInfo = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
@@ -260,6 +316,12 @@ CreateDevice(const VkPhysicalDevice& PhysicalDevice, u32* FamilyIndex)
 	{
 		VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 		VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
+		VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME,
+		VK_KHR_8BIT_STORAGE_EXTENSION_NAME,
+		VK_KHR_16BIT_STORAGE_EXTENSION_NAME,
+#if IsRtxSupported
+		VK_NV_MESH_SHADER_EXTENSION_NAME,
+#endif
 	};
 
 	std::vector<const char*> Layers = 
@@ -272,8 +334,21 @@ CreateDevice(const VkPhysicalDevice& PhysicalDevice, u32* FamilyIndex)
 	QueueCreateInfo.queueCount = 1;
 	QueueCreateInfo.pQueuePriorities = QueuePriorities;
 
-	VkPhysicalDeviceFeatures Feature = {};
-	Feature.vertexPipelineStoresAndAtomics = true;
+	VkPhysicalDeviceFeatures2 Features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+
+	VkPhysicalDevice8BitStorageFeatures Features8 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES};
+	Features8.storageBuffer8BitAccess = true;
+	Features8.uniformAndStorageBuffer8BitAccess = true;
+
+	VkPhysicalDevice16BitStorageFeatures Features16 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES};
+	Features16.storageBuffer16BitAccess = true;
+	Features16.uniformAndStorageBuffer16BitAccess = true;
+
+#if IsRtxSupported
+	VkPhysicalDeviceMeshShaderFeaturesNV FeaturesNV = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_NV};
+	FeaturesNV.meshShader = true;
+	FeaturesNV.taskShader = true;
+#endif
 
 	VkDeviceCreateInfo DeviceCreateInfo = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
 	DeviceCreateInfo.ppEnabledExtensionNames = Extensions.data();
@@ -282,9 +357,17 @@ CreateDevice(const VkPhysicalDevice& PhysicalDevice, u32* FamilyIndex)
 	DeviceCreateInfo.enabledLayerCount = (u32)Layers.size();
 	DeviceCreateInfo.queueCreateInfoCount = 1;
 	DeviceCreateInfo.pQueueCreateInfos = &QueueCreateInfo;
-	DeviceCreateInfo.pEnabledFeatures = &Feature;
+
+	DeviceCreateInfo.pNext = &Features;
+	Features.pNext = &Features8;
+	Features8.pNext = &Features16;
+#if IsRtxSupported
+	Features16.pNext = &FeaturesNV;
+#endif
+
 	VkDevice Device = 0;
-	VK_CHECK(vkCreateDevice(PhysicalDevice, &DeviceCreateInfo, 0, &Device));
+	VkResult ThisResult = vkCreateDevice(PhysicalDevice, &DeviceCreateInfo, 0, &Device);
+	VK_CHECK(ThisResult);
 
 	return Device;
 }
@@ -529,15 +612,28 @@ LoadShader(VkDevice Device, const char* Path)
 internal VkPipelineLayout
 CreatePipelineLayout(VkDevice Device)
 {
+#if IsRtxSupported
+	VkDescriptorSetLayoutBinding SetBindings[2] = {};
+	SetBindings[0].binding = 0;
+	SetBindings[0].descriptorCount = 1;
+	SetBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	SetBindings[0].stageFlags = VK_SHADER_STAGE_MESH_BIT_NV;
+
+	SetBindings[1].binding = 1;
+	SetBindings[1].descriptorCount = 1;
+	SetBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	SetBindings[1].stageFlags = VK_SHADER_STAGE_MESH_BIT_NV;
+#else
 	VkDescriptorSetLayoutBinding SetBindings[1] = {};
 	SetBindings[0].binding = 0;
 	SetBindings[0].descriptorCount = 1;
 	SetBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 	SetBindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+#endif
 
 	VkDescriptorSetLayoutCreateInfo DescriptorSetLayoutCreateInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; 
 	DescriptorSetLayoutCreateInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
-	DescriptorSetLayoutCreateInfo.bindingCount = 1;
+	DescriptorSetLayoutCreateInfo.bindingCount = ArraySize(SetBindings);
 	DescriptorSetLayoutCreateInfo.pBindings = SetBindings;
 
 	VkDescriptorSetLayout DescriptorSetLayout = 0;
@@ -563,7 +659,11 @@ CreateGraphicsPipeline(VkDevice Device, VkPipelineCache PipelineCache, VkPipelin
 	VkPipelineShaderStageCreateInfo Stages[2] = {};
 	Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 	Stages[0].module = VS;
+#if IsRtxSupported
+	Stages[0].stage = VK_SHADER_STAGE_MESH_BIT_NV;
+#else
 	Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+#endif
 	Stages[0].pName = "main";
 	Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 	Stages[1].module = FS;
@@ -573,7 +673,7 @@ CreateGraphicsPipeline(VkDevice Device, VkPipelineCache PipelineCache, VkPipelin
 	CreateInfo.layout = PipelineLayout;
 	CreateInfo.renderPass = RenderPass;
 	CreateInfo.pStages = Stages;
-	CreateInfo.stageCount = 2;
+	CreateInfo.stageCount = ArraySize(Stages);
 
 	VkPipelineVertexInputStateCreateInfo VertexInputState = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
 
@@ -594,6 +694,7 @@ CreateGraphicsPipeline(VkDevice Device, VkPipelineCache PipelineCache, VkPipelin
 
 	VkPipelineRasterizationStateCreateInfo RasterizationState = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
 	RasterizationState.lineWidth = 1.0f;
+	RasterizationState.cullMode = VK_CULL_MODE_BACK_BIT;
 
 	VkPipelineDynamicStateCreateInfo DynamicState = {VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
 	VkDynamicState DynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
@@ -694,6 +795,17 @@ CreateBuffer(buffer& Buffer, VkDevice Device, const VkPhysicalDeviceMemoryProper
 	VK_CHECK(vkMapMemory(Device, Buffer.Memory, 0, Size, 0, &Buffer.Data));
 }
 
+internal VkQueryPool
+CreateQueryPool(VkDevice Device, VkQueryType Type, uint32_t QueryCount)
+{
+	VkQueryPoolCreateInfo CreateInfo = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+	CreateInfo.queryType = Type;
+	CreateInfo.queryCount = QueryCount;
+	VkQueryPool Result = 0;
+	VK_CHECK(vkCreateQueryPool(Device, &CreateInfo, 0, &Result));
+	return Result;
+}
+
 internal void
 DestroyBuffer(buffer& Buffer, VkDevice Device)
 {
@@ -729,6 +841,10 @@ WinMain(HINSTANCE CurrInst,
 		 PSTR Cmd, 
 		 int CmdShow) 
 {
+	LARGE_INTEGER TimeFreq = {};
+	QueryPerformanceFrequency(&TimeFreq);
+	LARGE_INTEGER BegTime = {}, EndTime = {};
+
 	const char ClassName[] = "Vulkan Win32 Engine";
 	WNDCLASS WinClass = {};
 	WinClass.lpfnWndProc = WindowProc;
@@ -757,10 +873,8 @@ WinMain(HINSTANCE CurrInst,
 
 	mesh Mesh;
 	bool IsMeshLoaded = LoadMesh(Mesh, "..\\assets\\kitten.obj");
-	if(!IsMeshLoaded)
-	{
-		printf("Couldn't load kitten mesh!\n");
-	}
+	assert(IsMeshLoaded);
+	BuildMeshlets(Mesh);
 
 	VK_CHECK(volkInitialize());
 	VkInstance Instance = CreateInstance(ClassName);
@@ -780,8 +894,17 @@ WinMain(HINSTANCE CurrInst,
 	VkPhysicalDevice PhysicalDevice = PickPhysicalDevice(PhysicalDevices, &FamilyIndex);
 	assert(PhysicalDevice);
 
+	VkPhysicalDeviceProperties Props;
+	vkGetPhysicalDeviceProperties(PhysicalDevice, &Props);
+	assert(Props.limits.timestampPeriod);
+
 	VkDevice Device = CreateDevice(PhysicalDevice, &FamilyIndex);
 	assert(Device);
+
+	u32 Count = 0;
+	vkEnumerateDeviceExtensionProperties(PhysicalDevice, nullptr, &Count, 0);
+	std::vector<VkExtensionProperties> Extensions(Count);
+	vkEnumerateDeviceExtensionProperties(PhysicalDevice, nullptr, &Count, Extensions.data());
 
 	VkWin32SurfaceCreateInfoKHR SurfaceCreateInfo = {VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
 	SurfaceCreateInfo.hinstance = CurrInst;
@@ -804,9 +927,14 @@ WinMain(HINSTANCE CurrInst,
 	vkGetDeviceQueue(Device, FamilyIndex, 0, &Queue);
 	assert(Queue);
 
-	VkShaderModule TriangleVertexShader = LoadShader(Device, "..\\shaders\\triangle.vert.spv");
+#if IsRtxSupported
+	VkShaderModule TriangleVertexShader = LoadShader(Device, "..\\shaders\\object.mesh.spv");
 	assert(TriangleVertexShader);
-	VkShaderModule TriangleFragmentShader = LoadShader(Device, "..\\shaders\\triangle.frag.spv");
+#else
+	VkShaderModule TriangleVertexShader = LoadShader(Device, "..\\shaders\\object.vert.spv");
+	assert(TriangleVertexShader);
+#endif
+	VkShaderModule TriangleFragmentShader = LoadShader(Device, "..\\shaders\\object.frag.spv");
 	assert(TriangleFragmentShader);
 
 	VkRenderPass RenderPass = CreateRenderPass(Device, SurfaceFormat.format);
@@ -833,19 +961,29 @@ WinMain(HINSTANCE CurrInst,
 	VkCommandBuffer CommandBuffer = 0;
 	vkAllocateCommandBuffers(Device, &CommandBufferAllocateInfo, &CommandBuffer);
 
+	VkQueryPool QueryPool = CreateQueryPool(Device, VK_QUERY_TYPE_TIMESTAMP, 128);
+	assert(QueryPool);
+
 	VkPhysicalDeviceMemoryProperties MemoryProperties;
 	vkGetPhysicalDeviceMemoryProperties(PhysicalDevice, &MemoryProperties);
 
-	buffer VertexBuffer = {}, IndexBuffer = {};
+	buffer VertexBuffer = {}, IndexBuffer = {}, MeshletBuffer = {};
 	CreateBuffer(VertexBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 	memcpy(VertexBuffer.Data, Mesh.Vertices.data(), sizeof(vertex) * Mesh.Vertices.size());
 
-	CreateBuffer(IndexBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+	CreateBuffer(IndexBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
 	memcpy(IndexBuffer.Data, Mesh.Indices.data(), sizeof(u32) * Mesh.Indices.size());
+
+	CreateBuffer(MeshletBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+	memcpy(MeshletBuffer.Data, Mesh.Meshlets.data(), sizeof(meshlet) * Mesh.Meshlets.size());
+
+	double CpuAvgTime = 0;
+	double GpuAvgTime = 0;
 
 	while(IsRunning)
 	{
 		DispatchMessages();
+		QueryPerformanceCounter(&BegTime);
 
 		VkSurfaceCapabilitiesKHR ResizeCaps;
 		VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(PhysicalDevice, Surface, &ResizeCaps));
@@ -862,6 +1000,9 @@ WinMain(HINSTANCE CurrInst,
 		VkCommandBufferBeginInfo CommandBufferBeginInfo = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
 		CommandBufferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 		vkBeginCommandBuffer(CommandBuffer, &CommandBufferBeginInfo);
+
+		vkCmdResetQueryPool(CommandBuffer, QueryPool, 0, 128);
+		vkCmdWriteTimestamp(CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, QueryPool, 0);
 
 		PipelineBarrierImage(CommandBuffer, Swapchain.Images[ImageIndex], VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
@@ -884,24 +1025,49 @@ WinMain(HINSTANCE CurrInst,
 
 		vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, TrianglePipeline);
 
-		VkDescriptorBufferInfo BufferInfo = {};
-		BufferInfo.buffer = VertexBuffer.Handle;
-		BufferInfo.offset = 0;
-		BufferInfo.range = VertexBuffer.Size;
+		VkDescriptorBufferInfo VertexBufferInfo = {};
+		VertexBufferInfo.buffer = VertexBuffer.Handle;
+		VertexBufferInfo.offset = 0;
+		VertexBufferInfo.range = VertexBuffer.Size;
 
+#if IsRtxSupported
+		VkDescriptorBufferInfo MeshletBufferInfo = {};
+		MeshletBufferInfo.buffer = MeshletBuffer.Handle;
+		MeshletBufferInfo.offset = 0;
+		MeshletBufferInfo.range = MeshletBuffer.Size;
+
+		VkWriteDescriptorSet DescriptorSets[2] = {};
+		DescriptorSets[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		DescriptorSets[0].dstBinding = 0;
+		DescriptorSets[0].descriptorCount = 1;
+		DescriptorSets[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		DescriptorSets[0].pBufferInfo = &VertexBufferInfo;
+		DescriptorSets[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		DescriptorSets[1].dstBinding = 1;
+		DescriptorSets[1].descriptorCount = 1;
+		DescriptorSets[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		DescriptorSets[1].pBufferInfo = &MeshletBufferInfo;
+
+		vkCmdPushDescriptorSetKHR(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, TriangleLayout, 0, 2, DescriptorSets);
+		vkCmdDrawMeshTasksNV(CommandBuffer, u32(Mesh.Meshlets.size()), 0);
+#else
 		VkWriteDescriptorSet DescriptorSets[1] = {};
 		DescriptorSets[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		DescriptorSets[0].dstBinding = 0;
 		DescriptorSets[0].descriptorCount = 1;
 		DescriptorSets[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		DescriptorSets[0].pBufferInfo = &BufferInfo;
+		DescriptorSets[0].pBufferInfo = &VertexBufferInfo;
 
 		vkCmdPushDescriptorSetKHR(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, TriangleLayout, 0, 1, DescriptorSets);
 		vkCmdBindIndexBuffer(CommandBuffer, IndexBuffer.Handle, 0, VK_INDEX_TYPE_UINT32);
-		vkCmdDrawIndexed(CommandBuffer, Mesh.Indices.size(), 1, 0, 0, 0);
+		vkCmdDrawIndexed(CommandBuffer, u32(Mesh.Indices.size()), 1, 0, 0, 0);
+#endif
 
 		vkCmdEndRenderPass(CommandBuffer);
 		PipelineBarrierImage(CommandBuffer, Swapchain.Images[ImageIndex], VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+
+		vkCmdWriteTimestamp(CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, QueryPool, 1);
+
 		vkEndCommandBuffer(CommandBuffer);
 
 		VkPipelineStageFlags SubmitStageFlag = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -924,10 +1090,27 @@ WinMain(HINSTANCE CurrInst,
 		vkQueuePresentKHR(Queue, &PresentInfo);
 
 		vkDeviceWaitIdle(Device);
+
+		u64 QueryResults[2] = {};
+		vkGetQueryPoolResults(Device, QueryPool, 0, ArraySize(QueryResults), sizeof(QueryResults), QueryResults, sizeof(QueryResults[0]), VK_QUERY_RESULT_64_BIT);
+
+		QueryPerformanceCounter(&EndTime);
+
+		CpuAvgTime = CpuAvgTime * 0.75f + (float)(EndTime.QuadPart - BegTime.QuadPart) / (float)TimeFreq.QuadPart * 1000.0f * 0.25f;
+		GpuAvgTime = GpuAvgTime * 0.75f + (float)(QueryResults[1] - QueryResults[0]) * (float)Props.limits.timestampPeriod * 1.e-6f * 0.25f;
+
+		char Title[256];
+		sprintf(Title, "Vulkan Engine - cpu: %.2f ms, gpu: %.2f ms", 
+				CpuAvgTime, 
+			    GpuAvgTime);
+		SetWindowTextA(Window, Title);
 	}
 
 	DestroyBuffer(VertexBuffer, Device);
 	DestroyBuffer(IndexBuffer, Device);
+	DestroyBuffer(MeshletBuffer, Device);
+
+	vkDestroyQueryPool(Device, QueryPool, 0);
 
 	vkDestroyCommandPool(Device, CommandPool, 0);
 
