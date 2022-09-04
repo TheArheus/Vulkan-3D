@@ -30,9 +30,6 @@
 #include "objparser.h"
 #include "objparser.cpp"
 
-#include <io.h>
-#include <fcntl.h>
-
 typedef char					s8;
 typedef short					s16;
 typedef int						s32;
@@ -60,6 +57,8 @@ typedef s64						bool64;
 
 #include "mesh_loader.h"
 global_variable bool IsRunning;
+global_variable bool IsRtxSupported;
+global_variable bool IsRtxEnabled;
 
 struct swapchain
 {
@@ -148,10 +147,8 @@ LoadMesh(mesh& Result, const char* Path)
 	meshopt_remapVertexBuffer(Result.Vertices.data(), Vertices.data(), IndexCount, sizeof(vertex), Remap.data());
 	meshopt_remapIndexBuffer(Result.Indices.data(), 0, IndexCount, Remap.data());
 
-#if 1
 	meshopt_optimizeVertexCache(Result.Indices.data(), Result.Indices.data(), IndexCount, VertexCount);
 	meshopt_optimizeVertexFetch(Result.Vertices.data(), Result.Indices.data(), IndexCount, Result.Vertices.data(), VertexCount, sizeof(vertex));
-#endif
 
 	return true;
 }
@@ -230,6 +227,18 @@ DispatchMessages()
 			case WM_KEYDOWN:
 			case WM_KEYUP:
 			{
+				u32 KeyCode = (u32)Message.wParam;
+
+				bool IsDown = ((Message.lParam & (1 << 31)) == 0);
+				bool WasDown = ((Message.lParam & (1 << 30)) != 0);
+
+				if(IsDown)
+				{
+					if(KeyCode == 'R')
+					{
+						IsRtxEnabled = !IsRtxEnabled;
+					}
+				}
 			} break;
 
 			default:
@@ -324,9 +333,7 @@ CreateDevice(const VkPhysicalDevice& PhysicalDevice, u32* FamilyIndex)
 		VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME,
 		VK_KHR_8BIT_STORAGE_EXTENSION_NAME,
 		VK_KHR_16BIT_STORAGE_EXTENSION_NAME,
-#if IsRtxSupported
 		VK_NV_MESH_SHADER_EXTENSION_NAME,
-#endif
 	};
 
 	std::vector<const char*> Layers = 
@@ -349,11 +356,9 @@ CreateDevice(const VkPhysicalDevice& PhysicalDevice, u32* FamilyIndex)
 	Features16.storageBuffer16BitAccess = true;
 	Features16.uniformAndStorageBuffer16BitAccess = true;
 
-#if IsRtxSupported
 	VkPhysicalDeviceMeshShaderFeaturesNV FeaturesNV = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_NV};
 	FeaturesNV.meshShader = true;
 	FeaturesNV.taskShader = true;
-#endif
 
 	VkDeviceCreateInfo DeviceCreateInfo = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
 	DeviceCreateInfo.ppEnabledExtensionNames = Extensions.data();
@@ -366,9 +371,7 @@ CreateDevice(const VkPhysicalDevice& PhysicalDevice, u32* FamilyIndex)
 	DeviceCreateInfo.pNext = &Features;
 	Features.pNext = &Features8;
 	Features8.pNext = &Features16;
-#if IsRtxSupported
 	Features16.pNext = &FeaturesNV;
-#endif
 
 	VkDevice Device = 0;
 	VkResult ThisResult = vkCreateDevice(PhysicalDevice, &DeviceCreateInfo, 0, &Device);
@@ -621,33 +624,41 @@ struct shader_layout
 };
 
 internal shader_layout 
-CreatePipelineLayout(VkDevice Device)
+CreatePipelineLayout(VkDevice Device, bool RtxEnabled)
 {
 	shader_layout Result = {};
 
-#if IsRtxSupported
-	VkDescriptorSetLayoutBinding SetBindings[2] = {};
-	SetBindings[0].binding = 0;
-	SetBindings[0].descriptorCount = 1;
-	SetBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	SetBindings[0].stageFlags = VK_SHADER_STAGE_MESH_BIT_NV;
+	std::vector<VkDescriptorSetLayoutBinding> SetBindings;
+	if(RtxEnabled)
+	{
+		VkDescriptorSetLayoutBinding NewBindings0 = {};
+		NewBindings0.binding = 0;
+		NewBindings0.descriptorCount = 1;
+		NewBindings0.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		NewBindings0.stageFlags = VK_SHADER_STAGE_MESH_BIT_NV;
 
-	SetBindings[1].binding = 1;
-	SetBindings[1].descriptorCount = 1;
-	SetBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	SetBindings[1].stageFlags = VK_SHADER_STAGE_MESH_BIT_NV;
-#else
-	VkDescriptorSetLayoutBinding SetBindings[1] = {};
-	SetBindings[0].binding = 0;
-	SetBindings[0].descriptorCount = 1;
-	SetBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	SetBindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-#endif
+		VkDescriptorSetLayoutBinding NewBindings1 = {};
+		NewBindings1.binding = 1;
+		NewBindings1.descriptorCount = 1;
+		NewBindings1.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		NewBindings1.stageFlags = VK_SHADER_STAGE_MESH_BIT_NV;
+		SetBindings.push_back(NewBindings0);
+		SetBindings.push_back(NewBindings1);
+	}
+	else
+	{
+		VkDescriptorSetLayoutBinding NewBindings = {};
+		NewBindings.binding = 0;
+		NewBindings.descriptorCount = 1;
+		NewBindings.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		NewBindings.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+		SetBindings.push_back(NewBindings);
+	}
 
 	VkDescriptorSetLayoutCreateInfo DescriptorSetLayoutCreateInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; 
 	DescriptorSetLayoutCreateInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
-	DescriptorSetLayoutCreateInfo.bindingCount = ArraySize(SetBindings);
-	DescriptorSetLayoutCreateInfo.pBindings = SetBindings;
+	DescriptorSetLayoutCreateInfo.bindingCount = (u32)SetBindings.size();
+	DescriptorSetLayoutCreateInfo.pBindings = SetBindings.data();
 
 	VK_CHECK(vkCreateDescriptorSetLayout(Device, &DescriptorSetLayoutCreateInfo, 0, &Result.DescriptorSetLayout));
 
@@ -661,18 +672,14 @@ CreatePipelineLayout(VkDevice Device)
 }
 
 internal VkPipeline
-CreateGraphicsPipeline(VkDevice Device, VkPipelineCache PipelineCache, shader_layout Layout, VkRenderPass RenderPass, VkShaderModule VS, VkShaderModule FS)
+CreateGraphicsPipeline(VkDevice Device, VkPipelineCache PipelineCache, shader_layout Layout, VkRenderPass RenderPass, VkShaderModule VS, VkShaderModule FS, bool RtxEnabled)
 {
 	VkGraphicsPipelineCreateInfo CreateInfo = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
 
 	VkPipelineShaderStageCreateInfo Stages[2] = {};
 	Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 	Stages[0].module = VS;
-#if IsRtxSupported
-	Stages[0].stage = VK_SHADER_STAGE_MESH_BIT_NV;
-#else
-	Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-#endif
+	Stages[0].stage = RtxEnabled ? VK_SHADER_STAGE_MESH_BIT_NV : VK_SHADER_STAGE_VERTEX_BIT;
 	Stages[0].pName = "main";
 	Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 	Stages[1].module = FS;
@@ -947,6 +954,21 @@ WinMain(HINSTANCE CurrInst,
 	vkGetPhysicalDeviceProperties(PhysicalDevice, &Props);
 	assert(Props.limits.timestampPeriod);
 
+	u32 ExtensionCount = 0;
+	vkEnumerateDeviceExtensionProperties(PhysicalDevice, 0, &ExtensionCount, 0);
+	std::vector<VkExtensionProperties> SupportedExtensions(ExtensionCount);
+	vkEnumerateDeviceExtensionProperties(PhysicalDevice, 0, &ExtensionCount, SupportedExtensions.data());
+
+	for(const auto& Extension : SupportedExtensions)
+	{
+		if(strcmp(Extension.extensionName, "VK_NV_mesh_shader") == 0)
+		{
+			IsRtxSupported = true;
+			break;
+		}
+	}
+	IsRtxEnabled = IsRtxSupported;
+
 	VkDevice Device = CreateDevice(PhysicalDevice, &FamilyIndex);
 	assert(Device);
 
@@ -976,15 +998,16 @@ WinMain(HINSTANCE CurrInst,
 	vkGetDeviceQueue(Device, FamilyIndex, 0, &Queue);
 	assert(Queue);
 
-#if IsRtxSupported
-	VkShaderModule TriangleVertexShader = LoadShader(Device, "..\\shaders\\object.mesh.spv");
-	assert(TriangleVertexShader);
-#else
-	VkShaderModule TriangleVertexShader = LoadShader(Device, "..\\shaders\\object.vert.spv");
-	assert(TriangleVertexShader);
-#endif
-	VkShaderModule TriangleFragmentShader = LoadShader(Device, "..\\shaders\\object.frag.spv");
-	assert(TriangleFragmentShader);
+	VkShaderModule ObjectMeshShader = 0;
+	if(IsRtxSupported)
+	{
+		ObjectMeshShader = LoadShader(Device, "..\\shaders\\object.mesh.spv");
+		assert(ObjectMeshShader);
+	}
+	VkShaderModule ObjectVertexShader = LoadShader(Device, "..\\shaders\\object.vert.spv");
+	assert(ObjectVertexShader);
+	VkShaderModule ObjectFragmentShader = LoadShader(Device, "..\\shaders\\object.frag.spv");
+	assert(ObjectFragmentShader);
 
 	VkRenderPass RenderPass = CreateRenderPass(Device, SurfaceFormat.format);
 	assert(RenderPass);
@@ -992,9 +1015,18 @@ WinMain(HINSTANCE CurrInst,
 	CreateSwapchain(Swapchain, RenderPass, Device, Surface, SurfaceFormat, SurfaceCaps, ClientWidth, ClientHeight, &FamilyIndex);
 
 	VkPipelineCache PipelineCache = 0;
-	shader_layout TriangleLayout = CreatePipelineLayout(Device);
-	VkPipeline TrianglePipeline = CreateGraphicsPipeline(Device, PipelineCache, TriangleLayout, RenderPass, TriangleVertexShader, TriangleFragmentShader);
-	assert(TrianglePipeline);
+	shader_layout MeshLayout = CreatePipelineLayout(Device, false);
+	VkPipeline MeshPipeline = CreateGraphicsPipeline(Device, PipelineCache, MeshLayout, RenderPass, ObjectVertexShader, ObjectFragmentShader, false);
+	assert(MeshPipeline);
+
+	shader_layout RtxLayout = {};
+	VkPipeline RtxPipeline = 0;
+	if(IsRtxSupported)
+	{
+		RtxLayout = CreatePipelineLayout(Device, true);
+		RtxPipeline = CreateGraphicsPipeline(Device, PipelineCache, RtxLayout, RenderPass, ObjectMeshShader, ObjectFragmentShader, true);
+		assert(RtxPipeline);
+	}
 
 	VkCommandPoolCreateInfo CommandPoolCreateInfo = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
 	CommandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
@@ -1026,8 +1058,11 @@ WinMain(HINSTANCE CurrInst,
 	CreateBuffer(IndexBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 	CopyBuffer(ScratchBuffer, IndexBuffer, Mesh.Indices.data(), sizeof(u32) * Mesh.Indices.size(), Device, CommandPool, CommandBuffer, Queue);
 
-	CreateBuffer(MeshletBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-	CopyBuffer(ScratchBuffer, MeshletBuffer, Mesh.Meshlets.data(), sizeof(meshlet) * Mesh.Meshlets.size(), Device, CommandPool, CommandBuffer, Queue);
+	if(IsRtxSupported)
+	{
+		CreateBuffer(MeshletBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+		CopyBuffer(ScratchBuffer, MeshletBuffer, Mesh.Meshlets.data(), sizeof(meshlet) * Mesh.Meshlets.size(), Device, CommandPool, CommandBuffer, Queue);
+	}
 
 	double CpuAvgTime = 0;
 	double GpuAvgTime = 0;
@@ -1075,45 +1110,50 @@ WinMain(HINSTANCE CurrInst,
 		vkCmdSetViewport(CommandBuffer, 0, 1, &Viewport);
 		vkCmdSetScissor(CommandBuffer, 0, 1, &Scissor);
 
-		vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, TrianglePipeline);
-
 		VkDescriptorBufferInfo VertexBufferInfo = {};
 		VertexBufferInfo.buffer = VertexBuffer.Handle;
 		VertexBufferInfo.offset = 0;
 		VertexBufferInfo.range = VertexBuffer.Size;
 
-#if IsRtxSupported
-		VkDescriptorBufferInfo MeshletBufferInfo = {};
-		MeshletBufferInfo.buffer = MeshletBuffer.Handle;
-		MeshletBufferInfo.offset = 0;
-		MeshletBufferInfo.range = MeshletBuffer.Size;
+		if(IsRtxEnabled)
+		{
+			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, RtxPipeline);
 
-		VkWriteDescriptorSet DescriptorSets[2] = {};
-		DescriptorSets[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		DescriptorSets[0].dstBinding = 0;
-		DescriptorSets[0].descriptorCount = 1;
-		DescriptorSets[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		DescriptorSets[0].pBufferInfo = &VertexBufferInfo;
-		DescriptorSets[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		DescriptorSets[1].dstBinding = 1;
-		DescriptorSets[1].descriptorCount = 1;
-		DescriptorSets[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		DescriptorSets[1].pBufferInfo = &MeshletBufferInfo;
+			VkDescriptorBufferInfo MeshletBufferInfo = {};
+			MeshletBufferInfo.buffer = MeshletBuffer.Handle;
+			MeshletBufferInfo.offset = 0;
+			MeshletBufferInfo.range = MeshletBuffer.Size;
 
-		vkCmdPushDescriptorSetKHR(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, TriangleLayout.PipelineLayout, 0, 2, DescriptorSets);
-		vkCmdDrawMeshTasksNV(CommandBuffer, u32(Mesh.Meshlets.size()), 0);
-#else
-		VkWriteDescriptorSet DescriptorSets[1] = {};
-		DescriptorSets[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		DescriptorSets[0].dstBinding = 0;
-		DescriptorSets[0].descriptorCount = 1;
-		DescriptorSets[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		DescriptorSets[0].pBufferInfo = &VertexBufferInfo;
+			VkWriteDescriptorSet DescriptorSets[2] = {};
+			DescriptorSets[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			DescriptorSets[0].dstBinding = 0;
+			DescriptorSets[0].descriptorCount = 1;
+			DescriptorSets[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			DescriptorSets[0].pBufferInfo = &VertexBufferInfo;
+			DescriptorSets[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			DescriptorSets[1].dstBinding = 1;
+			DescriptorSets[1].descriptorCount = 1;
+			DescriptorSets[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			DescriptorSets[1].pBufferInfo = &MeshletBufferInfo;
 
-		vkCmdPushDescriptorSetKHR(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, TriangleLayout.PipelineLayout, 0, 1, DescriptorSets);
-		vkCmdBindIndexBuffer(CommandBuffer, IndexBuffer.Handle, 0, VK_INDEX_TYPE_UINT32);
-		vkCmdDrawIndexed(CommandBuffer, u32(Mesh.Indices.size()), 1, 0, 0, 0);
-#endif
+			vkCmdPushDescriptorSetKHR(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, RtxLayout.PipelineLayout, 0, 2, DescriptorSets);
+			vkCmdDrawMeshTasksNV(CommandBuffer, u32(Mesh.Meshlets.size()), 0);
+		}
+		else
+		{
+			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, MeshPipeline);
+
+			VkWriteDescriptorSet DescriptorSets[1] = {};
+			DescriptorSets[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			DescriptorSets[0].dstBinding = 0;
+			DescriptorSets[0].descriptorCount = 1;
+			DescriptorSets[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			DescriptorSets[0].pBufferInfo = &VertexBufferInfo;
+
+			vkCmdPushDescriptorSetKHR(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, MeshLayout.PipelineLayout, 0, 1, DescriptorSets);
+			vkCmdBindIndexBuffer(CommandBuffer, IndexBuffer.Handle, 0, VK_INDEX_TYPE_UINT32);
+			vkCmdDrawIndexed(CommandBuffer, u32(Mesh.Indices.size()), 1, 0, 0, 0);
+		}
 
 		vkCmdEndRenderPass(CommandBuffer);
 		PipelineBarrierImage(CommandBuffer, Swapchain.Images[ImageIndex], VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
@@ -1152,7 +1192,8 @@ WinMain(HINSTANCE CurrInst,
 		GpuAvgTime = GpuAvgTime * 0.75f + (float)(QueryResults[1] - QueryResults[0]) * (float)Props.limits.timestampPeriod * 1.e-6f * 0.25f;
 
 		char Title[256];
-		sprintf(Title, "Vulkan Engine - cpu: %.2f ms, gpu: %.2f ms; Triangles Count - %llu; Meshlets Count - %llu", 
+		sprintf(Title, "%s; Vulkan Engine - cpu: %.2f ms, gpu: %.2f ms; Triangles Count - %llu; Meshlets Count - %llu", 
+				IsRtxEnabled ? "RTX Is Enabled" : "RTX Is Disabled",
 				CpuAvgTime, 
 			    GpuAvgTime,
 				Mesh.Indices.size() / 3,
@@ -1160,9 +1201,13 @@ WinMain(HINSTANCE CurrInst,
 		SetWindowTextA(Window, Title);
 	}
 
+	if(IsRtxSupported)
+	{
+		DestroyBuffer(MeshletBuffer, Device);
+	}
+
 	DestroyBuffer(VertexBuffer, Device);
 	DestroyBuffer(IndexBuffer, Device);
-	DestroyBuffer(MeshletBuffer, Device);
 	DestroyBuffer(ScratchBuffer, Device);
 
 	vkDestroyQueryPool(Device, QueryPool, 0);
@@ -1173,12 +1218,20 @@ WinMain(HINSTANCE CurrInst,
 
 	vkDestroyRenderPass(Device, RenderPass, 0);
 
-	vkDestroyPipeline(Device, TrianglePipeline, 0);
-	vkDestroyDescriptorSetLayout(Device, TriangleLayout.DescriptorSetLayout, 0);
-	vkDestroyPipelineLayout(Device, TriangleLayout.PipelineLayout, 0);
+	vkDestroyPipeline(Device, MeshPipeline, 0);
+	vkDestroyDescriptorSetLayout(Device, MeshLayout.DescriptorSetLayout, 0);
+	vkDestroyPipelineLayout(Device, MeshLayout.PipelineLayout, 0);
 
-	vkDestroyShaderModule(Device, TriangleFragmentShader, 0);
-	vkDestroyShaderModule(Device, TriangleVertexShader, 0);
+	if(IsRtxSupported)
+	{
+		vkDestroyPipeline(Device, RtxPipeline, 0);
+		vkDestroyDescriptorSetLayout(Device, RtxLayout.DescriptorSetLayout, 0);
+		vkDestroyPipelineLayout(Device, RtxLayout.PipelineLayout, 0);
+		vkDestroyShaderModule(Device, ObjectMeshShader, 0);
+	}
+
+	vkDestroyShaderModule(Device, ObjectFragmentShader, 0);
+	vkDestroyShaderModule(Device, ObjectVertexShader, 0);
 
 	vkDestroySemaphore(Device, AcquireSemaphore, 0);
 	vkDestroySemaphore(Device, ReleaseSemaphore, 0);

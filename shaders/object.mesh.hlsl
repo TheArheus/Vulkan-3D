@@ -20,6 +20,17 @@ struct VsOutput
 	float4 Color : COLOR;
 };
 
+uint Hash(uint a)
+{
+   a = (a+0x7ed55d16) + (a<<12);
+   a = (a^0xc761c23c) ^ (a>>19);
+   a = (a+0x165667b1) + (a<<5);
+   a = (a+0xd3a2646c) ^ (a<<9);
+   a = (a+0xfd7046c5) + (a<<3);
+   a = (a^0xb55a4f09) ^ (a>>16);
+   return a;
+}
+
 StructuredBuffer<vertex> VertexBuffer;
 StructuredBuffer<meshlet> MeshletBuffer;
 
@@ -31,6 +42,11 @@ void main(uint3 WorkGroupID : SV_GroupID, uint ThreadIndex : SV_GroupIndex,
 	uint mi = WorkGroupID.x;
 	meshlet CurrentMeshlet = MeshletBuffer.Load(mi);
 	SetMeshOutputCounts(CurrentMeshlet.VertexCount, CurrentMeshlet.TriangleCount);
+
+#if _DEBUG
+	uint MeshletHash = Hash(mi);
+	float3 Color = float3(float(MeshletHash & 255), float((MeshletHash >> 8) & 255), float((MeshletHash >> 16) & 255)) / 255.0f;
+#endif
 
 	uint nx, ny, nz;
 	uint VertexCount = CurrentMeshlet.VertexCount;
@@ -49,7 +65,11 @@ void main(uint3 WorkGroupID : SV_GroupID, uint ThreadIndex : SV_GroupIndex,
 		float2 TexCoord = float2(Vertex.tu, Vertex.tv);
 
 		OutVertices[VIndex].Position = float4(Position + float3(0, 0, 0.5), 1.0);
+#if _DEBUG
+		OutVertices[VIndex].Color = float4(Color, 1.0f);
+#else
 		OutVertices[VIndex].Color = float4(Normal * 0.5 + float3(0.5, 0.5, 0.5), 1.0f);
+#endif
 	}
 
 	uint TriangleCount = CurrentMeshlet.TriangleCount;
