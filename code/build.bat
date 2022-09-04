@@ -13,7 +13,7 @@ set CommonLinkFlags=-opt:ref -incremental:no /SUBSYSTEM:console /LIBPATH:%Vulkan
 if not exist ..\build\ mkdir ..\build\
 pushd ..\build\
 C:\DirectXShaderCompiler.bin\Debug\bin\dxc.exe -spirv -T vs_6_6 -E main ..\shaders\object.vert.hlsl -Fo ..\shaders\object.vert.spv -enable-16bit-types -fspv-target-env=vulkan1.2 -fspv-extension=SPV_KHR_16bit_storage
-C:\DirectXShaderCompiler.bin\Debug\bin\dxc.exe -spirv -T ps_6_6 -E main ..\shaders\object.frag.hlsl -Fo ..\shaders\object.frag.spv -enable-16bit-types -fspv-target-env=vulkan1.2
 C:\DirectXShaderCompiler.bin\Debug\bin\dxc.exe -spirv -T ms_6_6 -E main ..\shaders\object.mesh.hlsl -Fo ..\shaders\object.mesh.spv -enable-16bit-types -fspv-target-env=vulkan1.2 -fspv-extension=SPV_NV_mesh_shader -fspv-extension=SPV_KHR_16bit_storage
+C:\DirectXShaderCompiler.bin\Debug\bin\dxc.exe -spirv -T ps_6_6 -E main ..\shaders\object.frag.hlsl -Fo ..\shaders\object.frag.spv -enable-16bit-types -fspv-target-env=vulkan1.2
 cl %CommonCompFlags% user32.lib kernel32.lib vulkan-1.lib ..\code\main.cpp %OneFile% /link %CommonLinkFlags%
 popd

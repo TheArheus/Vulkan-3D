@@ -82,9 +82,9 @@ struct buffer
 
 struct vertex
 {
-	float vx, vy, vz;
-	float nx, ny, nz;
-	float tu, tv;
+	uint16_t vx, vy, vz;
+	u32 norm;
+	uint16_t tu, tv;
 };
 
 // NOTE: Unfortunatly I am using 16 bit data instead of 8 bit data 
@@ -92,7 +92,7 @@ struct vertex
 struct meshlet
 {
 	u32 Vertices[64];
-	u32 Indices[126]; 
+	u32 Indices[126*3]; // NOTE: up to 126 triangles
 	u32 TriangleCount;
 	u32 VertexCount;
 };
@@ -125,18 +125,18 @@ LoadMesh(mesh& Result, const char* Path)
 		int VTextureIndex = File.f[VertexIndex * 3 + 1];
 		int VNormalIndex = File.f[VertexIndex * 3 + 2];
 
-		V.vx = File.v[VIndex * 3 + 0];
-		V.vy = File.v[VIndex * 3 + 1];
-		V.vz = File.v[VIndex * 3 + 2];
+		V.vx = meshopt_quantizeHalf(File.v[VIndex * 3 + 0]);
+		V.vy = meshopt_quantizeHalf(File.v[VIndex * 3 + 1]);
+		V.vz = meshopt_quantizeHalf(File.v[VIndex * 3 + 2]);
 
-		V.nx = VNormalIndex < 0 ? 0.f : File.vn[VNormalIndex * 3 + 0];
-		V.ny = VNormalIndex < 0 ? 0.f : File.vn[VNormalIndex * 3 + 1];
-		V.nz = VNormalIndex < 0 ? 0.f : File.vn[VNormalIndex * 3 + 2];
+		float nx = VNormalIndex < 0 ? 0.f : File.vn[VNormalIndex * 3 + 0];
+		float ny = VNormalIndex < 0 ? 0.f : File.vn[VNormalIndex * 3 + 1];
+		float nz = VNormalIndex < 0 ? 0.f : File.vn[VNormalIndex * 3 + 2];
 
-		//V.norm = ((u8)(nx * 127 + 127) << 24) | ((u8)(ny * 127 + 127) << 16) | ((u8)(nz * 127 + 127) << 8) | 0;
+		V.norm = ((u8)(nx * 127 + 127) << 24) | ((u8)(ny * 127 + 127) << 16) | ((u8)(nz * 127 + 127) << 8) | 0;
 
-		V.tu = VTextureIndex < 0 ? 0.f : File.vt[VTextureIndex * 3 + 0];
-		V.tv = VTextureIndex < 0 ? 0.f : File.vt[VTextureIndex * 3 + 1];
+		V.tu = meshopt_quantizeHalf(VTextureIndex < 0 ? 0.f : File.vt[VTextureIndex * 3 + 0]);
+		V.tv = meshopt_quantizeHalf(VTextureIndex < 0 ? 0.f : File.vt[VTextureIndex * 3 + 1]);
 	}
 
 	std::vector<u32> Remap(IndexCount);
@@ -148,6 +148,11 @@ LoadMesh(mesh& Result, const char* Path)
 	meshopt_remapVertexBuffer(Result.Vertices.data(), Vertices.data(), IndexCount, sizeof(vertex), Remap.data());
 	meshopt_remapIndexBuffer(Result.Indices.data(), 0, IndexCount, Remap.data());
 
+#if 1
+	meshopt_optimizeVertexCache(Result.Indices.data(), Result.Indices.data(), IndexCount, VertexCount);
+	meshopt_optimizeVertexFetch(Result.Vertices.data(), Result.Indices.data(), IndexCount, Result.Vertices.data(), VertexCount, sizeof(vertex));
+#endif
+
 	return true;
 }
 
@@ -155,7 +160,7 @@ internal void
 BuildMeshlets(mesh& Mesh)
 {
 	meshlet Meshlet = {};
-	std::vector<u32> MeshletVertices(Mesh.Vertices.size(), -1);
+	std::vector<u32> MeshletVertices(Mesh.Vertices.size(), 0xffffffff);
 
 	for(size_t TriangleIndex = 0;
 		TriangleIndex < Mesh.Indices.size(); 
@@ -176,7 +181,7 @@ BuildMeshlets(mesh& Mesh)
 			Mesh.Meshlets.push_back(Meshlet);
 			for (size_t InnerIndex = 0; InnerIndex < Meshlet.VertexCount; InnerIndex++) 
 			{
-				MeshletVertices[Meshlet.Vertices[InnerIndex]] = -1;
+				MeshletVertices[Meshlet.Vertices[InnerIndex]] = 0xffffffff;
 			}
 			Meshlet = {};
 			
@@ -609,9 +614,17 @@ LoadShader(VkDevice Device, const char* Path)
 	return Result;
 }
 
-internal VkPipelineLayout
+struct shader_layout 
+{
+	VkPipelineLayout PipelineLayout;
+	VkDescriptorSetLayout DescriptorSetLayout;
+};
+
+internal shader_layout 
 CreatePipelineLayout(VkDevice Device)
 {
+	shader_layout Result = {};
+
 #if IsRtxSupported
 	VkDescriptorSetLayoutBinding SetBindings[2] = {};
 	SetBindings[0].binding = 0;
@@ -636,23 +649,19 @@ CreatePipelineLayout(VkDevice Device)
 	DescriptorSetLayoutCreateInfo.bindingCount = ArraySize(SetBindings);
 	DescriptorSetLayoutCreateInfo.pBindings = SetBindings;
 
-	VkDescriptorSetLayout DescriptorSetLayout = 0;
-	VK_CHECK(vkCreateDescriptorSetLayout(Device, &DescriptorSetLayoutCreateInfo, 0, &DescriptorSetLayout));
+	VK_CHECK(vkCreateDescriptorSetLayout(Device, &DescriptorSetLayoutCreateInfo, 0, &Result.DescriptorSetLayout));
 
 	VkPipelineLayoutCreateInfo CreateInfo = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-	CreateInfo.pSetLayouts = &DescriptorSetLayout;
+	CreateInfo.pSetLayouts = &Result.DescriptorSetLayout;
 	CreateInfo.setLayoutCount = 1;
 
-	VkPipelineLayout Result = 0;
-	VK_CHECK(vkCreatePipelineLayout(Device, &CreateInfo, 0, &Result));
-
-	//vkDestroyDescriptorSetLayout(Device, DescriptorSetLayout, 0);
+	VK_CHECK(vkCreatePipelineLayout(Device, &CreateInfo, 0, &Result.PipelineLayout));
 
 	return Result;
 }
 
 internal VkPipeline
-CreateGraphicsPipeline(VkDevice Device, VkPipelineCache PipelineCache, VkPipelineLayout PipelineLayout, VkRenderPass RenderPass, VkShaderModule VS, VkShaderModule FS)
+CreateGraphicsPipeline(VkDevice Device, VkPipelineCache PipelineCache, shader_layout Layout, VkRenderPass RenderPass, VkShaderModule VS, VkShaderModule FS)
 {
 	VkGraphicsPipelineCreateInfo CreateInfo = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
 
@@ -670,7 +679,7 @@ CreateGraphicsPipeline(VkDevice Device, VkPipelineCache PipelineCache, VkPipelin
 	Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
 	Stages[1].pName = "main";
 
-	CreateInfo.layout = PipelineLayout;
+	CreateInfo.layout = Layout.PipelineLayout;
 	CreateInfo.renderPass = RenderPass;
 	CreateInfo.pStages = Stages;
 	CreateInfo.stageCount = ArraySize(Stages);
@@ -771,7 +780,7 @@ u32 SelectMemoryType(const VkPhysicalDeviceMemoryProperties& MemoryProperties, u
 }
 
 internal void
-CreateBuffer(buffer& Buffer, VkDevice Device, const VkPhysicalDeviceMemoryProperties& MemoryProperties, size_t Size, VkBufferUsageFlags Usage)
+CreateBuffer(buffer& Buffer, VkDevice Device, const VkPhysicalDeviceMemoryProperties& MemoryProperties, size_t Size, VkBufferUsageFlags Usage, VkMemoryPropertyFlags MemoryFlags)
 {
 	VkBufferCreateInfo CreateInfo = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
 	CreateInfo.usage = Usage;
@@ -782,17 +791,57 @@ CreateBuffer(buffer& Buffer, VkDevice Device, const VkPhysicalDeviceMemoryProper
 	VkMemoryRequirements Requirements;
 	vkGetBufferMemoryRequirements(Device, Buffer.Handle, &Requirements);
 
-	u32 MemoryTypeIndex = SelectMemoryType(MemoryProperties, Requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+	u32 MemoryTypeIndex = SelectMemoryType(MemoryProperties, Requirements.memoryTypeBits, MemoryFlags);
 	assert(MemoryTypeIndex != ~0u);
 
 	VkMemoryAllocateInfo AllocateInfo = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
 	AllocateInfo.memoryTypeIndex = MemoryTypeIndex;
 	AllocateInfo.allocationSize = Requirements.size;
+
 	VK_CHECK(vkAllocateMemory(Device, &AllocateInfo, 0, &Buffer.Memory));
 
 	vkBindBufferMemory(Device, Buffer.Handle, Buffer.Memory, 0);
 
-	VK_CHECK(vkMapMemory(Device, Buffer.Memory, 0, Size, 0, &Buffer.Data));
+	if (MemoryFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) 
+	{
+		VK_CHECK(vkMapMemory(Device, Buffer.Memory, 0, Size, 0, &Buffer.Data));
+	}
+}
+
+internal void
+CopyBuffer(buffer& Src, buffer& Dst, const void* Data, size_t Size, VkDevice Device, VkCommandPool CommandPool, VkCommandBuffer CommandBuffer, VkQueue Queue)
+{
+	assert(Src.Data);
+	assert(Src.Size >= Size);
+	memcpy(Src.Data, Data, Size);
+
+	VK_CHECK(vkResetCommandPool(Device, CommandPool, 0));
+	VkCommandBufferBeginInfo CommandBufferBeginInfo = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+	CommandBufferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	vkBeginCommandBuffer(CommandBuffer, &CommandBufferBeginInfo);
+
+	VkBufferCopy Region = {0, 0, VkDeviceSize(Size)};
+	vkCmdCopyBuffer(CommandBuffer, Src.Handle, Dst.Handle, 1, &Region);
+
+	VkBufferMemoryBarrier CopyBarrier = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+	CopyBarrier.buffer = Dst.Handle;
+	CopyBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	CopyBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	CopyBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	CopyBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	CopyBarrier.offset = 0;
+	CopyBarrier.size = VK_WHOLE_SIZE;
+
+	vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0, 0, 1, &CopyBarrier, 0, 0);
+
+	vkEndCommandBuffer(CommandBuffer);
+
+	VkSubmitInfo SubmitInfo = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+	SubmitInfo.commandBufferCount = 1;
+	SubmitInfo.pCommandBuffers = &CommandBuffer;
+	VK_CHECK(vkQueueSubmit(Queue, 1, &SubmitInfo, VK_NULL_HANDLE));
+
+	VK_CHECK(vkDeviceWaitIdle(Device));
 }
 
 internal VkQueryPool
@@ -943,7 +992,7 @@ WinMain(HINSTANCE CurrInst,
 	CreateSwapchain(Swapchain, RenderPass, Device, Surface, SurfaceFormat, SurfaceCaps, ClientWidth, ClientHeight, &FamilyIndex);
 
 	VkPipelineCache PipelineCache = 0;
-	VkPipelineLayout TriangleLayout = CreatePipelineLayout(Device);
+	shader_layout TriangleLayout = CreatePipelineLayout(Device);
 	VkPipeline TrianglePipeline = CreateGraphicsPipeline(Device, PipelineCache, TriangleLayout, RenderPass, TriangleVertexShader, TriangleFragmentShader);
 	assert(TrianglePipeline);
 
@@ -967,15 +1016,18 @@ WinMain(HINSTANCE CurrInst,
 	VkPhysicalDeviceMemoryProperties MemoryProperties;
 	vkGetPhysicalDeviceMemoryProperties(PhysicalDevice, &MemoryProperties);
 
+	buffer ScratchBuffer = {};
+	CreateBuffer(ScratchBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
 	buffer VertexBuffer = {}, IndexBuffer = {}, MeshletBuffer = {};
-	CreateBuffer(VertexBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-	memcpy(VertexBuffer.Data, Mesh.Vertices.data(), sizeof(vertex) * Mesh.Vertices.size());
+	CreateBuffer(VertexBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	CopyBuffer(ScratchBuffer, VertexBuffer, Mesh.Vertices.data(), sizeof(vertex) * Mesh.Vertices.size(), Device, CommandPool, CommandBuffer, Queue);
 
-	CreateBuffer(IndexBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-	memcpy(IndexBuffer.Data, Mesh.Indices.data(), sizeof(u32) * Mesh.Indices.size());
+	CreateBuffer(IndexBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	CopyBuffer(ScratchBuffer, IndexBuffer, Mesh.Indices.data(), sizeof(u32) * Mesh.Indices.size(), Device, CommandPool, CommandBuffer, Queue);
 
-	CreateBuffer(MeshletBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-	memcpy(MeshletBuffer.Data, Mesh.Meshlets.data(), sizeof(meshlet) * Mesh.Meshlets.size());
+	CreateBuffer(MeshletBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	CopyBuffer(ScratchBuffer, MeshletBuffer, Mesh.Meshlets.data(), sizeof(meshlet) * Mesh.Meshlets.size(), Device, CommandPool, CommandBuffer, Queue);
 
 	double CpuAvgTime = 0;
 	double GpuAvgTime = 0;
@@ -1048,7 +1100,7 @@ WinMain(HINSTANCE CurrInst,
 		DescriptorSets[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 		DescriptorSets[1].pBufferInfo = &MeshletBufferInfo;
 
-		vkCmdPushDescriptorSetKHR(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, TriangleLayout, 0, 2, DescriptorSets);
+		vkCmdPushDescriptorSetKHR(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, TriangleLayout.PipelineLayout, 0, 2, DescriptorSets);
 		vkCmdDrawMeshTasksNV(CommandBuffer, u32(Mesh.Meshlets.size()), 0);
 #else
 		VkWriteDescriptorSet DescriptorSets[1] = {};
@@ -1058,7 +1110,7 @@ WinMain(HINSTANCE CurrInst,
 		DescriptorSets[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 		DescriptorSets[0].pBufferInfo = &VertexBufferInfo;
 
-		vkCmdPushDescriptorSetKHR(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, TriangleLayout, 0, 1, DescriptorSets);
+		vkCmdPushDescriptorSetKHR(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, TriangleLayout.PipelineLayout, 0, 1, DescriptorSets);
 		vkCmdBindIndexBuffer(CommandBuffer, IndexBuffer.Handle, 0, VK_INDEX_TYPE_UINT32);
 		vkCmdDrawIndexed(CommandBuffer, u32(Mesh.Indices.size()), 1, 0, 0, 0);
 #endif
@@ -1100,15 +1152,18 @@ WinMain(HINSTANCE CurrInst,
 		GpuAvgTime = GpuAvgTime * 0.75f + (float)(QueryResults[1] - QueryResults[0]) * (float)Props.limits.timestampPeriod * 1.e-6f * 0.25f;
 
 		char Title[256];
-		sprintf(Title, "Vulkan Engine - cpu: %.2f ms, gpu: %.2f ms", 
+		sprintf(Title, "Vulkan Engine - cpu: %.2f ms, gpu: %.2f ms; Triangles Count - %llu; Meshlets Count - %llu", 
 				CpuAvgTime, 
-			    GpuAvgTime);
+			    GpuAvgTime,
+				Mesh.Indices.size() / 3,
+				Mesh.Meshlets.size());
 		SetWindowTextA(Window, Title);
 	}
 
 	DestroyBuffer(VertexBuffer, Device);
 	DestroyBuffer(IndexBuffer, Device);
 	DestroyBuffer(MeshletBuffer, Device);
+	DestroyBuffer(ScratchBuffer, Device);
 
 	vkDestroyQueryPool(Device, QueryPool, 0);
 
@@ -1119,7 +1174,8 @@ WinMain(HINSTANCE CurrInst,
 	vkDestroyRenderPass(Device, RenderPass, 0);
 
 	vkDestroyPipeline(Device, TrianglePipeline, 0);
-	vkDestroyPipelineLayout(Device, TriangleLayout, 0);
+	vkDestroyDescriptorSetLayout(Device, TriangleLayout.DescriptorSetLayout, 0);
+	vkDestroyPipelineLayout(Device, TriangleLayout.PipelineLayout, 0);
 
 	vkDestroyShaderModule(Device, TriangleFragmentShader, 0);
 	vkDestroyShaderModule(Device, TriangleVertexShader, 0);
