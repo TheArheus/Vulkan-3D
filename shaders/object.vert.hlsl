@@ -12,11 +12,11 @@ struct VsOutput
 	float4 Color : COLOR;
 };
 
-StructuredBuffer<vertex> VertexBuffer;
+RWByteAddressBuffer VertexBuffer;
 
 VsOutput main(uint VertexIndex:SV_VertexID)
 {
-	vertex Vertex = VertexBuffer.Load(VertexIndex);
+	vertex Vertex = VertexBuffer.Load<vertex>(VertexIndex*16);
 	float3 Position = float3(Vertex.vx, Vertex.vy, Vertex.vz);
 	uint nx, ny, nz;
 	nx = (Vertex.norm & 0xff000000) >> 24;

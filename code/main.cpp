@@ -1,107 +1,4 @@
-#include <assert.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <vector>
-#include <windows.h>
-#define VK_NO_PROTOTYPES
-#include <vulkan/vulkan.h>
-#include <vulkan/vulkan_win32.h>
-#include <Volk/volk.h>
-#include <Volk/volk.c>
-
-// NOTE: remove this if possible
-#include "meshoptimizer/meshoptimizer.h"
-#include "meshoptimizer/allocator.cpp"
-#include "meshoptimizer/clusterizer.cpp"
-#include "meshoptimizer/indexcodec.cpp"
-#include "meshoptimizer/indexgenerator.cpp"
-#include "meshoptimizer/overdrawanalyzer.cpp"
-#include "meshoptimizer/overdrawoptimizer.cpp"
-#include "meshoptimizer/simplifier.cpp"
-#include "meshoptimizer/spatialorder.cpp"
-#include "meshoptimizer/vcacheanalyzer.cpp"
-#include "meshoptimizer/vcacheoptimizer.cpp"
-#include "meshoptimizer/vertexcodec.cpp"
-#include "meshoptimizer/vertexfilter.cpp"
-#include "meshoptimizer/vfetchanalyzer.cpp"
-#include "meshoptimizer/vfetchoptimizer.cpp"
-
-#include "objparser.h"
-#include "objparser.cpp"
-
-typedef char					s8;
-typedef short					s16;
-typedef int						s32;
-typedef long long int			s64;
-
-typedef unsigned char			u8;
-typedef unsigned short			u16;
-typedef unsigned int			u32;
-typedef unsigned long long int	u64;
-
-typedef s32						bool32;
-typedef s64						bool64;
-
-#define internal static
-#define global_variable static
-#define local_persist static
-
-#define ArraySize(Arr) (sizeof(Arr) / sizeof(Arr[0]))
-
-#define VK_CHECK(call) \
-	do { \
-		VkResult CallResult = call; \
-		assert(CallResult == VK_SUCCESS); \
-	} while(0);
-
-#include "mesh_loader.h"
-global_variable bool IsRunning;
-global_variable bool IsRtxSupported;
-global_variable bool IsRtxEnabled;
-
-struct swapchain
-{
-	VkSwapchainKHR Handle;
-
-	std::vector<VkImage> Images;
-	std::vector<VkImageView> ImageViews;
-	std::vector<VkFramebuffer> Framebuffers;
-
-	u32 Width, Height;
-};
-
-struct buffer
-{
-	VkBuffer Handle;
-	VkDeviceMemory Memory;
-	void* Data;
-	size_t Size;
-};
-
-struct vertex
-{
-	uint16_t vx, vy, vz;
-	u32 norm;
-	uint16_t tu, tv;
-};
-
-// NOTE: Unfortunatly I am using 16 bit data instead of 8 bit data 
-// as hlsl is not support 8 bit data;
-struct meshlet
-{
-	u32 Vertices[64];
-	u32 Indices[126*3]; // NOTE: up to 126 triangles
-	u32 TriangleCount;
-	u32 VertexCount;
-};
-
-struct mesh
-{
-	std::vector<vertex> Vertices;
-	std::vector<u32> Indices;
-	std::vector<meshlet> Meshlets;
-};
+#include "intrinsics.h"
 
 internal bool
 LoadMesh(mesh& Result, const char* Path)
@@ -236,7 +133,7 @@ DispatchMessages()
 				{
 					if(KeyCode == 'R')
 					{
-						IsRtxEnabled = !IsRtxEnabled;
+						IsRtxEnabled = !IsRtxEnabled & IsRtxSupported;
 					}
 				}
 			} break;
@@ -273,7 +170,7 @@ CreateInstance(const char* ClassName)
 
 	std::vector<const char*> Layers = 
 	{
-#if _DEBUG
+#if VK_DEBUG
 		"VK_LAYER_KHRONOS_validation"
 #endif
 	};
@@ -333,8 +230,11 @@ CreateDevice(const VkPhysicalDevice& PhysicalDevice, u32* FamilyIndex)
 		VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME,
 		VK_KHR_8BIT_STORAGE_EXTENSION_NAME,
 		VK_KHR_16BIT_STORAGE_EXTENSION_NAME,
-		VK_NV_MESH_SHADER_EXTENSION_NAME,
 	};
+	if(IsRtxSupported)
+	{
+		Extensions.push_back(VK_NV_MESH_SHADER_EXTENSION_NAME);
+	}
 
 	std::vector<const char*> Layers = 
 	{
@@ -371,137 +271,16 @@ CreateDevice(const VkPhysicalDevice& PhysicalDevice, u32* FamilyIndex)
 	DeviceCreateInfo.pNext = &Features;
 	Features.pNext = &Features8;
 	Features8.pNext = &Features16;
-	Features16.pNext = &FeaturesNV;
+	if(IsRtxSupported)
+	{
+		Features16.pNext = &FeaturesNV;
+	}
 
 	VkDevice Device = 0;
 	VkResult ThisResult = vkCreateDevice(PhysicalDevice, &DeviceCreateInfo, 0, &Device);
 	VK_CHECK(ThisResult);
 
 	return Device;
-}
-
-internal VkFramebuffer
-CreateFramebuffer(VkDevice Device, VkRenderPass RenderPass, VkImageView View, u32 Width, u32 Height)
-{
-	VkFramebufferCreateInfo FramebufferCreateInfo = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-	FramebufferCreateInfo.pAttachments = &View;
-	FramebufferCreateInfo.attachmentCount = 1;
-	FramebufferCreateInfo.width = Width;
-	FramebufferCreateInfo.height = Height;
-	FramebufferCreateInfo.renderPass = RenderPass;
-	FramebufferCreateInfo.layers = 1;
-	VkFramebuffer Result = 0;
-	vkCreateFramebuffer(Device, &FramebufferCreateInfo, 0, &Result);
-	return Result;
-}
-
-internal VkImageView
-CreateImageView(VkDevice Device, VkImage Image, VkFormat Format)
-{
-	VkImageViewCreateInfo CreateInfo = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-	CreateInfo.format = Format;
-	CreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-	CreateInfo.image = Image;
-	CreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	CreateInfo.subresourceRange.layerCount = 1;
-	CreateInfo.subresourceRange.levelCount = 1;
-
-	VkImageView Result = 0;
-	vkCreateImageView(Device, &CreateInfo, 0, &Result);
-	return Result;
-}
-
-internal VkSwapchainKHR
-CreateSwapchain(VkDevice Device, VkSurfaceKHR Surface, VkSurfaceFormatKHR SurfaceFormat, VkSurfaceCapabilitiesKHR SurfaceCaps, u32 Width, u32 Height, u32* FamilyIndex, VkSwapchainKHR OldSwapchain = 0)
-{
-	VkCompositeAlphaFlagBitsKHR CompositeAlpha = 
-		(SurfaceCaps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR :
-		(SurfaceCaps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR) ? VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR :
-		(SurfaceCaps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR) ? VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR :
-		VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
-
-	VkSwapchainCreateInfoKHR SwapchainCreateInfo = {VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
-	SwapchainCreateInfo.surface = Surface;
-	SwapchainCreateInfo.minImageCount = 2;
-	SwapchainCreateInfo.imageFormat = SurfaceFormat.format;
-	SwapchainCreateInfo.imageColorSpace = SurfaceFormat.colorSpace;
-	SwapchainCreateInfo.imageExtent.width = Width;
-	SwapchainCreateInfo.imageExtent.height = Height;
-	SwapchainCreateInfo.imageArrayLayers = 1;
-	SwapchainCreateInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-	SwapchainCreateInfo.queueFamilyIndexCount = 1;
-	SwapchainCreateInfo.pQueueFamilyIndices = FamilyIndex;
-	SwapchainCreateInfo.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-	SwapchainCreateInfo.compositeAlpha = CompositeAlpha;
-	SwapchainCreateInfo.presentMode = VK_PRESENT_MODE_FIFO_KHR;
-	SwapchainCreateInfo.oldSwapchain = OldSwapchain;
-	VkSwapchainKHR Swapchain = 0;
-	VK_CHECK(vkCreateSwapchainKHR(Device, &SwapchainCreateInfo, 0, &Swapchain));
-	return Swapchain;
-}
-
-internal void
-CreateSwapchain(swapchain& Swapchain, VkRenderPass RenderPass, VkDevice Device, VkSurfaceKHR Surface, VkSurfaceFormatKHR SurfaceFormat, VkSurfaceCapabilitiesKHR SurfaceCaps, u32 Width, u32 Height, u32* FamilyIndex, VkSwapchainKHR OldSwapchain = 0)
-{
-	Swapchain.Handle = CreateSwapchain(Device, Surface, SurfaceFormat, SurfaceCaps, Width, Height, FamilyIndex, OldSwapchain);
-	Swapchain.Width  = Width;
-	Swapchain.Height = Height;
-
-	u32 SwapchainImageCount = 0;
-	vkGetSwapchainImagesKHR(Device, Swapchain.Handle, &SwapchainImageCount, 0);
-	std::vector<VkImage> SwapchainImages(SwapchainImageCount);
-	vkGetSwapchainImagesKHR(Device, Swapchain.Handle, &SwapchainImageCount, SwapchainImages.data());
-	Swapchain.Images = std::move(SwapchainImages);
-
-	std::vector<VkImageView> SwapchainImageViews(SwapchainImageCount);
-	for(u32 ImageViewIndex = 0;
-		ImageViewIndex < SwapchainImageViews.size();
-		++ImageViewIndex)
-	{
-		SwapchainImageViews[ImageViewIndex] = CreateImageView(Device, Swapchain.Images[ImageViewIndex], SurfaceFormat.format);
-		assert(SwapchainImageViews[ImageViewIndex]);
-	}
-	Swapchain.ImageViews = std::move(SwapchainImageViews);
-
-	std::vector<VkFramebuffer> Framebuffers(SwapchainImageCount);
-	for(u32 FramebufferIndex = 0;
-		FramebufferIndex < Framebuffers.size();
-		++FramebufferIndex)
-	{
-		Framebuffers[FramebufferIndex] = CreateFramebuffer(Device, RenderPass, Swapchain.ImageViews[FramebufferIndex], Width, Height);
-		assert(Framebuffers[FramebufferIndex]);
-	}
-	Swapchain.Framebuffers = std::move(Framebuffers);
-}
-
-internal void
-DestroySwapchain(const swapchain& Swapchain, VkDevice Device)
-{
-	for(u32 FramebufferIndex = 0;
-		FramebufferIndex < Swapchain.Framebuffers.size();
-		++FramebufferIndex)
-	{
-		vkDestroyFramebuffer(Device, Swapchain.Framebuffers[FramebufferIndex], 0);
-	}
-
-	for(u32 ImageViewIndex = 0;
-		ImageViewIndex < Swapchain.ImageViews.size();
-		++ImageViewIndex)
-	{
-		vkDestroyImageView(Device, Swapchain.ImageViews[ImageViewIndex], 0);
-	}
-
-	vkDestroySwapchainKHR(Device, Swapchain.Handle, 0);
-}
-
-internal void 
-ResizeSwapchain(swapchain& Result, VkRenderPass RenderPass, VkDevice Device, VkSurfaceKHR Surface, VkSurfaceFormatKHR SurfaceFormat, VkSurfaceCapabilitiesKHR SurfaceCaps, u32 Width, u32 Height, u32* FamilyIndex)
-{
-	VkSwapchainKHR OldSwapchain = Result.Handle;
-	swapchain Old = Result;
-	CreateSwapchain(Result, RenderPass, Device, Surface, SurfaceFormat, SurfaceCaps, Width, Height, FamilyIndex, OldSwapchain);
-	VK_CHECK(vkDeviceWaitIdle(Device));
-	DestroySwapchain(Old, Device);
 }
 
 internal VkRenderPass
@@ -587,154 +366,6 @@ PickPhysicalDevice(const std::vector<VkPhysicalDevice>& PhysicalDevices, u32* Fa
 	}
 
 	return Discrete ? Discrete : Fallback;
-}
-
-internal VkShaderModule
-LoadShader(VkDevice Device, const char* Path)
-{
-	VkShaderModule Result = 0;
-	FILE* File = fopen(Path, "rb");
-	if(File)
-	{
-		fseek(File, 0, SEEK_END);
-		long FileLength = ftell(File);
-		fseek(File, 0, SEEK_SET);
-
-		char* Buffer = (char*)malloc(FileLength);
-		assert(Buffer);
-
-		size_t ReadSize = fread(Buffer, 1, FileLength, File);
-		assert(ReadSize == size_t(FileLength));
-		assert(FileLength % 4 == 0);
-
-		VkShaderModuleCreateInfo CreateInfo = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-		CreateInfo.codeSize = FileLength;
-		CreateInfo.pCode = reinterpret_cast<const u32*>(Buffer);
-
-		VK_CHECK(vkCreateShaderModule(Device, &CreateInfo, 0, &Result));
-	}
-	fclose(File);
-	return Result;
-}
-
-struct shader_layout 
-{
-	VkPipelineLayout PipelineLayout;
-	VkDescriptorSetLayout DescriptorSetLayout;
-};
-
-internal shader_layout 
-CreatePipelineLayout(VkDevice Device, bool RtxEnabled)
-{
-	shader_layout Result = {};
-
-	std::vector<VkDescriptorSetLayoutBinding> SetBindings;
-	if(RtxEnabled)
-	{
-		VkDescriptorSetLayoutBinding NewBindings0 = {};
-		NewBindings0.binding = 0;
-		NewBindings0.descriptorCount = 1;
-		NewBindings0.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		NewBindings0.stageFlags = VK_SHADER_STAGE_MESH_BIT_NV;
-
-		VkDescriptorSetLayoutBinding NewBindings1 = {};
-		NewBindings1.binding = 1;
-		NewBindings1.descriptorCount = 1;
-		NewBindings1.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		NewBindings1.stageFlags = VK_SHADER_STAGE_MESH_BIT_NV;
-		SetBindings.push_back(NewBindings0);
-		SetBindings.push_back(NewBindings1);
-	}
-	else
-	{
-		VkDescriptorSetLayoutBinding NewBindings = {};
-		NewBindings.binding = 0;
-		NewBindings.descriptorCount = 1;
-		NewBindings.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		NewBindings.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-		SetBindings.push_back(NewBindings);
-	}
-
-	VkDescriptorSetLayoutCreateInfo DescriptorSetLayoutCreateInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; 
-	DescriptorSetLayoutCreateInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
-	DescriptorSetLayoutCreateInfo.bindingCount = (u32)SetBindings.size();
-	DescriptorSetLayoutCreateInfo.pBindings = SetBindings.data();
-
-	VK_CHECK(vkCreateDescriptorSetLayout(Device, &DescriptorSetLayoutCreateInfo, 0, &Result.DescriptorSetLayout));
-
-	VkPipelineLayoutCreateInfo CreateInfo = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-	CreateInfo.pSetLayouts = &Result.DescriptorSetLayout;
-	CreateInfo.setLayoutCount = 1;
-
-	VK_CHECK(vkCreatePipelineLayout(Device, &CreateInfo, 0, &Result.PipelineLayout));
-
-	return Result;
-}
-
-internal VkPipeline
-CreateGraphicsPipeline(VkDevice Device, VkPipelineCache PipelineCache, shader_layout Layout, VkRenderPass RenderPass, VkShaderModule VS, VkShaderModule FS, bool RtxEnabled)
-{
-	VkGraphicsPipelineCreateInfo CreateInfo = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-
-	VkPipelineShaderStageCreateInfo Stages[2] = {};
-	Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-	Stages[0].module = VS;
-	Stages[0].stage = RtxEnabled ? VK_SHADER_STAGE_MESH_BIT_NV : VK_SHADER_STAGE_VERTEX_BIT;
-	Stages[0].pName = "main";
-	Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-	Stages[1].module = FS;
-	Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-	Stages[1].pName = "main";
-
-	CreateInfo.layout = Layout.PipelineLayout;
-	CreateInfo.renderPass = RenderPass;
-	CreateInfo.pStages = Stages;
-	CreateInfo.stageCount = ArraySize(Stages);
-
-	VkPipelineVertexInputStateCreateInfo VertexInputState = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-
-	VkPipelineInputAssemblyStateCreateInfo InputAssemblyState = {VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-	InputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-
-	VkPipelineColorBlendStateCreateInfo ColorBlendState = {VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-	VkPipelineColorBlendAttachmentState ColorAttachmentState = {};
-	ColorAttachmentState.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-	ColorBlendState.pAttachments = &ColorAttachmentState;
-	ColorBlendState.attachmentCount = 1;
-
-	VkPipelineDepthStencilStateCreateInfo DepthStencilState = {VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
-
-	VkPipelineViewportStateCreateInfo ViewportState = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
-	ViewportState.viewportCount = 1;
-	ViewportState.scissorCount = 1;
-
-	VkPipelineRasterizationStateCreateInfo RasterizationState = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
-	RasterizationState.lineWidth = 1.0f;
-	RasterizationState.cullMode = VK_CULL_MODE_BACK_BIT;
-
-	VkPipelineDynamicStateCreateInfo DynamicState = {VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-	VkDynamicState DynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-	DynamicState.pDynamicStates = DynamicStates;
-	DynamicState.dynamicStateCount = 2;
-
-	VkPipelineMultisampleStateCreateInfo MultisampleState = {VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-	MultisampleState.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-
-	VkPipelineTessellationStateCreateInfo TessellationState = {VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO};
-
-	CreateInfo.pColorBlendState = &ColorBlendState;
-	CreateInfo.pDepthStencilState = &DepthStencilState;
-	CreateInfo.pDynamicState = &DynamicState;
-	CreateInfo.pInputAssemblyState = &InputAssemblyState;
-	CreateInfo.pMultisampleState = &MultisampleState;
-	CreateInfo.pRasterizationState = &RasterizationState;
-	CreateInfo.pTessellationState = &TessellationState;
-	CreateInfo.pVertexInputState = &VertexInputState;
-	CreateInfo.pViewportState = &ViewportState;
-
-	VkPipeline Result = 0;
-	VK_CHECK(vkCreateGraphicsPipelines(Device, PipelineCache, 1, &CreateInfo, 0, &Result));
-	return Result;
 }
 
 internal VkSurfaceFormatKHR 
@@ -998,16 +629,15 @@ WinMain(HINSTANCE CurrInst,
 	vkGetDeviceQueue(Device, FamilyIndex, 0, &Queue);
 	assert(Queue);
 
-	VkShaderModule ObjectMeshShader = 0;
+	shader ObjectMeshShader = {};
 	if(IsRtxSupported)
 	{
-		ObjectMeshShader = LoadShader(Device, "..\\shaders\\object.mesh.spv");
-		assert(ObjectMeshShader);
+		LoadShader(ObjectMeshShader, Device, "..\\shaders\\object.mesh.spv");
 	}
-	VkShaderModule ObjectVertexShader = LoadShader(Device, "..\\shaders\\object.vert.spv");
-	assert(ObjectVertexShader);
-	VkShaderModule ObjectFragmentShader = LoadShader(Device, "..\\shaders\\object.frag.spv");
-	assert(ObjectFragmentShader);
+	shader ObjectVertexShader = {};
+	LoadShader(ObjectVertexShader, Device, "..\\shaders\\object.vert.spv");
+	shader ObjectFragmentShader = {};
+	LoadShader(ObjectFragmentShader, Device, "..\\shaders\\object.frag.spv");
 
 	VkRenderPass RenderPass = CreateRenderPass(Device, SurfaceFormat.format);
 	assert(RenderPass);
@@ -1015,16 +645,34 @@ WinMain(HINSTANCE CurrInst,
 	CreateSwapchain(Swapchain, RenderPass, Device, Surface, SurfaceFormat, SurfaceCaps, ClientWidth, ClientHeight, &FamilyIndex);
 
 	VkPipelineCache PipelineCache = 0;
-	shader_layout MeshLayout = CreatePipelineLayout(Device, false);
-	VkPipeline MeshPipeline = CreateGraphicsPipeline(Device, PipelineCache, MeshLayout, RenderPass, ObjectVertexShader, ObjectFragmentShader, false);
+	VkDescriptorSetLayout MeshDescriptorSetLayout = CreateDescriptorSetLayout(Device, ObjectVertexShader, ObjectFragmentShader);
+	assert(MeshDescriptorSetLayout);
+
+	VkPipelineLayout MeshLayout = CreatePipelineLayout(Device, MeshDescriptorSetLayout);
+	assert(MeshLayout);
+
+	VkDescriptorUpdateTemplate MeshDescriptorTemplate = CreateDescriptorTemplate(Device, VK_PIPELINE_BIND_POINT_GRAPHICS, MeshLayout, ObjectVertexShader, ObjectFragmentShader);
+	assert(MeshDescriptorSetLayout);
+
+	VkPipeline MeshPipeline = CreateGraphicsPipeline(Device, PipelineCache, MeshLayout, RenderPass, ObjectVertexShader, ObjectFragmentShader);
 	assert(MeshPipeline);
 
-	shader_layout RtxLayout = {};
+	VkDescriptorSetLayout RtxDescriptorSetLayout = 0;
+	VkPipelineLayout RtxLayout = 0;
+	VkDescriptorUpdateTemplate RtxDescriptorTemplate = 0;
 	VkPipeline RtxPipeline = 0;
 	if(IsRtxSupported)
 	{
-		RtxLayout = CreatePipelineLayout(Device, true);
-		RtxPipeline = CreateGraphicsPipeline(Device, PipelineCache, RtxLayout, RenderPass, ObjectMeshShader, ObjectFragmentShader, true);
+		RtxDescriptorSetLayout = CreateDescriptorSetLayout(Device, ObjectMeshShader, ObjectFragmentShader);
+		assert(RtxDescriptorSetLayout);
+
+		RtxLayout = CreatePipelineLayout(Device, RtxDescriptorSetLayout);
+		assert(RtxLayout);
+
+		RtxDescriptorTemplate = CreateDescriptorTemplate(Device, VK_PIPELINE_BIND_POINT_GRAPHICS, RtxLayout, ObjectMeshShader, ObjectFragmentShader);
+		assert(RtxDescriptorTemplate);
+		
+		RtxPipeline = CreateGraphicsPipeline(Device, PipelineCache, RtxLayout, RenderPass, ObjectMeshShader, ObjectFragmentShader);
 		assert(RtxPipeline);
 	}
 
@@ -1110,11 +758,6 @@ WinMain(HINSTANCE CurrInst,
 		vkCmdSetViewport(CommandBuffer, 0, 1, &Viewport);
 		vkCmdSetScissor(CommandBuffer, 0, 1, &Scissor);
 
-		VkDescriptorBufferInfo VertexBufferInfo = {};
-		VertexBufferInfo.buffer = VertexBuffer.Handle;
-		VertexBufferInfo.offset = 0;
-		VertexBufferInfo.range = VertexBuffer.Size;
-
 		if(IsRtxEnabled)
 		{
 			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, RtxPipeline);
@@ -1124,33 +767,17 @@ WinMain(HINSTANCE CurrInst,
 			MeshletBufferInfo.offset = 0;
 			MeshletBufferInfo.range = MeshletBuffer.Size;
 
-			VkWriteDescriptorSet DescriptorSets[2] = {};
-			DescriptorSets[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-			DescriptorSets[0].dstBinding = 0;
-			DescriptorSets[0].descriptorCount = 1;
-			DescriptorSets[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-			DescriptorSets[0].pBufferInfo = &VertexBufferInfo;
-			DescriptorSets[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-			DescriptorSets[1].dstBinding = 1;
-			DescriptorSets[1].descriptorCount = 1;
-			DescriptorSets[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-			DescriptorSets[1].pBufferInfo = &MeshletBufferInfo;
+			descriptor_template DescriptorInfo[2] = {{VertexBuffer.Handle, 0, VertexBuffer.Size}, {MeshletBuffer.Handle, 0, MeshletBuffer.Size}};
 
-			vkCmdPushDescriptorSetKHR(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, RtxLayout.PipelineLayout, 0, 2, DescriptorSets);
+			vkCmdPushDescriptorSetWithTemplateKHR(CommandBuffer, RtxDescriptorTemplate, RtxLayout, 0, DescriptorInfo);
 			vkCmdDrawMeshTasksNV(CommandBuffer, u32(Mesh.Meshlets.size()), 0);
 		}
 		else
 		{
 			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, MeshPipeline);
+			descriptor_template DescriptorInfo[1] = {{VertexBuffer.Handle, 0, VertexBuffer.Size}};
 
-			VkWriteDescriptorSet DescriptorSets[1] = {};
-			DescriptorSets[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-			DescriptorSets[0].dstBinding = 0;
-			DescriptorSets[0].descriptorCount = 1;
-			DescriptorSets[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-			DescriptorSets[0].pBufferInfo = &VertexBufferInfo;
-
-			vkCmdPushDescriptorSetKHR(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, MeshLayout.PipelineLayout, 0, 1, DescriptorSets);
+			vkCmdPushDescriptorSetWithTemplateKHR(CommandBuffer, MeshDescriptorTemplate, MeshLayout, 0, DescriptorInfo);
 			vkCmdBindIndexBuffer(CommandBuffer, IndexBuffer.Handle, 0, VK_INDEX_TYPE_UINT32);
 			vkCmdDrawIndexed(CommandBuffer, u32(Mesh.Indices.size()), 1, 0, 0, 0);
 		}
@@ -1219,19 +846,21 @@ WinMain(HINSTANCE CurrInst,
 	vkDestroyRenderPass(Device, RenderPass, 0);
 
 	vkDestroyPipeline(Device, MeshPipeline, 0);
-	vkDestroyDescriptorSetLayout(Device, MeshLayout.DescriptorSetLayout, 0);
-	vkDestroyPipelineLayout(Device, MeshLayout.PipelineLayout, 0);
+	vkDestroyDescriptorUpdateTemplate(Device, MeshDescriptorTemplate, 0);
+	vkDestroyDescriptorSetLayout(Device, MeshDescriptorSetLayout, 0);
+	vkDestroyPipelineLayout(Device, MeshLayout, 0);
 
 	if(IsRtxSupported)
 	{
 		vkDestroyPipeline(Device, RtxPipeline, 0);
-		vkDestroyDescriptorSetLayout(Device, RtxLayout.DescriptorSetLayout, 0);
-		vkDestroyPipelineLayout(Device, RtxLayout.PipelineLayout, 0);
-		vkDestroyShaderModule(Device, ObjectMeshShader, 0);
+		vkDestroyDescriptorUpdateTemplate(Device, RtxDescriptorTemplate, 0);
+		vkDestroyDescriptorSetLayout(Device, RtxDescriptorSetLayout, 0);
+		vkDestroyPipelineLayout(Device, RtxLayout, 0);
+		vkDestroyShaderModule(Device, ObjectMeshShader.Handle, 0);
 	}
 
-	vkDestroyShaderModule(Device, ObjectFragmentShader, 0);
-	vkDestroyShaderModule(Device, ObjectVertexShader, 0);
+	vkDestroyShaderModule(Device, ObjectFragmentShader.Handle, 0);
+	vkDestroyShaderModule(Device, ObjectVertexShader.Handle, 0);
 
 	vkDestroySemaphore(Device, AcquireSemaphore, 0);
 	vkDestroySemaphore(Device, ReleaseSemaphore, 0);

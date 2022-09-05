@@ -40,10 +40,10 @@ void main(uint3 WorkGroupID : SV_GroupID, uint ThreadIndex : SV_GroupIndex,
 		  out vertices VsOutput OutVertices[64], out indices uint3 OutIndices[126])
 {
 	uint mi = WorkGroupID.x;
-	meshlet CurrentMeshlet = MeshletBuffer.Load(mi);
+	meshlet CurrentMeshlet = MeshletBuffer[mi];
 	SetMeshOutputCounts(CurrentMeshlet.VertexCount, CurrentMeshlet.TriangleCount);
 
-#if _DEBUG
+#if VK_DEBUG
 	uint MeshletHash = Hash(mi);
 	float3 Color = float3(float(MeshletHash & 255), float((MeshletHash >> 8) & 255), float((MeshletHash >> 16) & 255)) / 255.0f;
 #endif
@@ -56,7 +56,7 @@ void main(uint3 WorkGroupID : SV_GroupID, uint ThreadIndex : SV_GroupIndex,
 	{
 		uint CurrentVertex = CurrentMeshlet.Vertices[VIndex];
 
-		vertex Vertex = VertexBuffer.Load(CurrentVertex);
+		vertex Vertex = VertexBuffer[CurrentVertex];
 		float3 Position = float3(Vertex.vx, Vertex.vy, Vertex.vz);
 		nx = (Vertex.norm & 0xff000000) >> 24;
 		ny = (Vertex.norm & 0x00ff0000) >> 16;
@@ -65,7 +65,7 @@ void main(uint3 WorkGroupID : SV_GroupID, uint ThreadIndex : SV_GroupIndex,
 		float2 TexCoord = float2(Vertex.tu, Vertex.tv);
 
 		OutVertices[VIndex].Position = float4(Position + float3(0, 0, 0.5), 1.0);
-#if _DEBUG
+#if VK_DEBUG
 		OutVertices[VIndex].Color = float4(Color, 1.0f);
 #else
 		OutVertices[VIndex].Color = float4(Normal * 0.5 + float3(0.5, 0.5, 0.5), 1.0f);
