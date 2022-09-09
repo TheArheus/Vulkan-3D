@@ -1,4 +1,9 @@
 
+struct TsOutput
+{
+	uint Meshlets[32];
+};
+
 struct vertex
 {
 	float16_t vx, vy, vz;
@@ -8,6 +13,7 @@ struct vertex
 
 struct meshlet
 {
+	float4 Cone;
 	uint Vertices[64];
 	uint Indices[126*3]; 
 	uint TriangleCount;
@@ -20,6 +26,9 @@ struct VsOutput
 	float4 Color : COLOR;
 };
 
+[[vk::binding(0)]] StructuredBuffer<vertex> VertexBuffer;
+[[vk::binding(1)]] StructuredBuffer<meshlet> MeshletBuffer;
+
 uint Hash(uint a)
 {
    a = (a+0x7ed55d16) + (a<<12);
@@ -31,18 +40,20 @@ uint Hash(uint a)
    return a;
 }
 
-StructuredBuffer<vertex> VertexBuffer;
-StructuredBuffer<meshlet> MeshletBuffer;
+bool ConeCullTest(float4 Cone, float3 View)
+{
+	return dot(Cone.xyz, View) < Cone.w;
+}
 
 [numthreads(32, 1, 1)]
 [outputtopology("triangle")]
-void main(uint3 WorkGroupID : SV_GroupID, uint ThreadIndex : SV_GroupIndex,
+void main(uint3 WorkGroupID : SV_GroupID, uint3 LocalInvocation : SV_GroupThreadID, uint ThreadIndex : SV_GroupIndex, in payload TsOutput TaskOutput,
 		  out vertices VsOutput OutVertices[64], out indices uint3 OutIndices[126])
 {
-	uint mi = WorkGroupID.x;
+	uint mi = TaskOutput.Meshlets[WorkGroupID.x];
 	meshlet CurrentMeshlet = MeshletBuffer[mi];
-	SetMeshOutputCounts(CurrentMeshlet.VertexCount, CurrentMeshlet.TriangleCount);
 
+	SetMeshOutputCounts(CurrentMeshlet.VertexCount, CurrentMeshlet.TriangleCount);
 #if VK_DEBUG
 	uint MeshletHash = Hash(mi);
 	float3 Color = float3(float(MeshletHash & 255), float((MeshletHash >> 8) & 255), float((MeshletHash >> 16) & 255)) / 255.0f;

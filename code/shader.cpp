@@ -96,8 +96,11 @@ ParseShader(shader& Shader, const u32* Code, u32 CodeSize)
 
 	for(auto Var : Vars)
 	{
-		if(Var.IsValid && Var.StorageClass == SpvStorageClassStorageBuffer)
+		if(Var.IsValid && (Var.StorageClass == SpvStorageClassStorageBuffer || Var.StorageClass == SpvStorageClassUniform))
 		{
+			assert(Var.DescriptorSet == 0);
+			assert(Var.Binding < 32);
+			assert((Shader.StorageBufferMask & (1 << Var.Binding)) == 0);
 			Shader.StorageBufferMask |= 1 << Var.Binding;
 		}
 	}
@@ -137,13 +140,17 @@ LoadShader(shader& Shader, VkDevice Device, const char* Path)
 }
 
 internal VkDescriptorSetLayout
-CreateDescriptorSetLayout(VkDevice Device, shader& VS, shader& FS)
+CreateDescriptorSetLayout(VkDevice Device, shaders Shaders)
 {
 	VkDescriptorSetLayout Result = 0;
 
 	std::vector<VkDescriptorSetLayoutBinding> SetBindings;
 
-	u32 StorageBufferMask = VS.StorageBufferMask | FS.StorageBufferMask;
+	u32 StorageBufferMask = 0;
+	for(const shader* Shader : Shaders)
+	{
+		StorageBufferMask |= Shader->StorageBufferMask;
+	}
 
 	for(u32 BitIndex = 0;
 		BitIndex < 32;
@@ -156,13 +163,13 @@ CreateDescriptorSetLayout(VkDevice Device, shader& VS, shader& FS)
 			NewBinding.descriptorCount = 1;
 			NewBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 			NewBinding.stageFlags = 0;
-			if(VS.StorageBufferMask & (1 << BitIndex))
+
+			for(const shader* Shader : Shaders)
 			{
-				NewBinding.stageFlags |= VS.Stage;
-			}
-			if(FS.StorageBufferMask & (1 << BitIndex))
-			{
-				NewBinding.stageFlags |= FS.Stage;
+				if(Shader->StorageBufferMask & (1 << BitIndex))
+				{
+					NewBinding.stageFlags |= Shader->Stage;
+				}
 			}
 			SetBindings.push_back(NewBinding);
 		}
@@ -193,12 +200,16 @@ CreatePipelineLayout(VkDevice Device, VkDescriptorSetLayout DescriptorSetLayout)
 }
 
 internal VkDescriptorUpdateTemplate
-CreateDescriptorTemplate(VkDevice Device, VkPipelineBindPoint BindPoint, VkPipelineLayout PipelineLayout, shader& VS, shader& FS)
+CreateDescriptorTemplate(VkDevice Device, VkPipelineBindPoint BindPoint, VkPipelineLayout PipelineLayout, shaders Shaders)
 {
 	VkDescriptorUpdateTemplate Result = 0;
 	std::vector<VkDescriptorUpdateTemplateEntry> Entries;
 
-	u32 StorageBufferMask = VS.StorageBufferMask | FS.StorageBufferMask;
+	u32 StorageBufferMask = 0;
+	for(const shader* Shader : Shaders)
+	{
+		StorageBufferMask |= Shader->StorageBufferMask;
+	}
 
 	for(u32 BitIndex = 0;
 		BitIndex < 32;
@@ -232,24 +243,27 @@ CreateDescriptorTemplate(VkDevice Device, VkPipelineBindPoint BindPoint, VkPipel
 }
 
 internal VkPipeline
-CreateGraphicsPipeline(VkDevice Device, VkPipelineCache PipelineCache, VkPipelineLayout Layout, VkRenderPass RenderPass, const shader& VS, const shader& FS)
+CreateGraphicsPipeline(VkDevice Device, VkPipelineCache PipelineCache, VkPipelineLayout Layout, VkRenderPass RenderPass, shaders Shaders)
 {
 	VkGraphicsPipelineCreateInfo CreateInfo = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
 
-	VkPipelineShaderStageCreateInfo Stages[2] = {};
-	Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-	Stages[0].module = VS.Handle;
-	Stages[0].stage = VS.Stage;
-	Stages[0].pName = "main";
-	Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-	Stages[1].module = FS.Handle;
-	Stages[1].stage = FS.Stage;
-	Stages[1].pName = "main";
+	std::vector<VkPipelineShaderStageCreateInfo> Stages;
+	for(const shader* Shader : Shaders)
+	{
+		VkPipelineShaderStageCreateInfo Stage = {};
+
+		Stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		Stage.module = Shader->Handle;
+		Stage.stage = Shader->Stage;
+		Stage.pName = "main";
+
+		Stages.push_back(Stage);
+	}
 
 	CreateInfo.layout = Layout;
 	CreateInfo.renderPass = RenderPass;
-	CreateInfo.pStages = Stages;
-	CreateInfo.stageCount = ArraySize(Stages);
+	CreateInfo.pStages = Stages.data();
+	CreateInfo.stageCount = (u32)Stages.size();
 
 	VkPipelineVertexInputStateCreateInfo VertexInputState = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
 
@@ -270,7 +284,7 @@ CreateGraphicsPipeline(VkDevice Device, VkPipelineCache PipelineCache, VkPipelin
 
 	VkPipelineRasterizationStateCreateInfo RasterizationState = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
 	RasterizationState.lineWidth = 1.0f;
-	RasterizationState.cullMode = VK_CULL_MODE_BACK_BIT;
+	RasterizationState.cullMode = VK_CULL_MODE_FRONT_BIT;
 
 	VkPipelineDynamicStateCreateInfo DynamicState = {VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
 	VkDynamicState DynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};

@@ -6,6 +6,8 @@ struct shader
 	u32 StorageBufferMask;
 };
 
+using shaders = std::initializer_list<const shader*>;
+
 struct descriptor_template
 {
 	union

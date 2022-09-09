@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <vector>
+#include <algorithm>
 #include <windows.h>
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
@@ -90,29 +91,5 @@ struct buffer
 	VkDeviceMemory Memory;
 	void* Data;
 	size_t Size;
-};
-
-struct vertex
-{
-	uint16_t vx, vy, vz;
-	u32 norm;
-	uint16_t tu, tv;
-};
-
-// NOTE: Unfortunatly I am using 16 bit data instead of 8 bit data 
-// as hlsl is not support 8 bit data;
-struct meshlet
-{
-	u32 Vertices[64];
-	u32 Indices[126*3]; // NOTE: up to 126 triangles
-	u32 TriangleCount;
-	u32 VertexCount;
-};
-
-struct mesh
-{
-	std::vector<vertex> Vertices;
-	std::vector<u32> Indices;
-	std::vector<meshlet> Meshlets;
 };
 

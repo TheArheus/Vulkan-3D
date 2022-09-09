@@ -1,5 +1,30 @@
 #include "intrinsics.h"
 
+struct vertex
+{
+	uint16_t vx, vy, vz;
+	u32 norm;
+	uint16_t tu, tv;
+};
+
+// NOTE: Unfortunatly I am using 16 bit data instead of 8 bit data 
+// as hlsl is not support 8 bit data;
+struct meshlet
+{
+	float Cone[4];
+	u32 Vertices[64];
+	u32 Indices[126*3]; // NOTE: up to 126 triangles
+	u32 TriangleCount;
+	u32 VertexCount;
+};
+
+struct mesh
+{
+	std::vector<vertex> Vertices;
+	std::vector<u32> Indices;
+	std::vector<meshlet> Meshlets;
+};
+
 internal bool
 LoadMesh(mesh& Result, const char* Path)
 {
@@ -109,6 +134,116 @@ BuildMeshlets(mesh& Mesh)
 	{
 		Mesh.Meshlets.push_back(Meshlet);
 	}
+	while(Mesh.Meshlets.size() % 32)
+	{
+		meshlet NullMeshlet = {};
+		Mesh.Meshlets.push_back(NullMeshlet);
+	}
+}
+
+internal float
+HalfToFloat(u16 Half)
+{
+	u16 Sign = Half >> 15;
+	u16 Exp  = (Half >> 10) & 31;
+	u16 Mant = (Half) & 1023;
+
+	if(Exp == 0)
+	{
+		assert(Mant == 0);
+		return 0.0f;
+	}
+	else
+	{
+		return (Sign ? -1.0f : 1.0f) * ldexpf((float)(Mant + 1024) / 1024.0f, Exp - 15);
+	}
+}
+
+internal void
+BuildMeshletCones(mesh& Mesh)
+{
+	for(meshlet& Meshlet : Mesh.Meshlets)
+	{
+		float Normals[126][3] = {};
+
+		for(u32 TriangleIndex = 0;
+			TriangleIndex < Meshlet.TriangleCount;
+			++TriangleIndex)
+		{
+			u32 a = Meshlet.Indices[TriangleIndex * 3 + 0];
+			u32 b = Meshlet.Indices[TriangleIndex * 3 + 1];
+			u32 c = Meshlet.Indices[TriangleIndex * 3 + 2];
+
+			const vertex& va = Mesh.Vertices[Meshlet.Vertices[a]];
+			const vertex& vb = Mesh.Vertices[Meshlet.Vertices[b]];
+			const vertex& vc = Mesh.Vertices[Meshlet.Vertices[c]];
+
+			float p0[3] = {HalfToFloat(va.vx), HalfToFloat(va.vy), HalfToFloat(va.vz)};
+			float p1[3] = {HalfToFloat(vb.vx), HalfToFloat(vb.vy), HalfToFloat(vb.vz)};
+			float p2[3] = {HalfToFloat(vc.vx), HalfToFloat(vc.vy), HalfToFloat(vc.vz)};
+
+			float p10[3] = {p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]};
+			float p20[3] = {p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]};
+
+			float nx = p10[1] * p20[2] - p10[2] * p20[1];
+			float ny = p10[2] * p20[0] - p10[0] * p20[2];
+			float nz = p10[0] * p20[1] - p10[1] * p20[0];
+
+			float Length = sqrtf(nx * nx + ny * ny + nz * nz);
+			float InvLength = Length == 0.0f ? 0.0f : 1.0f / Length;
+
+			Normals[TriangleIndex][0] = nx * InvLength;
+			Normals[TriangleIndex][1] = ny * InvLength;
+			Normals[TriangleIndex][2] = nz * InvLength;
+		}
+
+		float AvgNormal[3] = {};
+
+		for(u32 TriangleIndex = 0;
+			TriangleIndex < Meshlet.TriangleCount;
+			++TriangleIndex)
+		{
+			AvgNormal[0] += Normals[TriangleIndex][0];
+			AvgNormal[1] += Normals[TriangleIndex][1];
+			AvgNormal[2] += Normals[TriangleIndex][2];
+		}
+
+		float AvgLength = sqrtf(AvgNormal[0] * AvgNormal[0] + 
+								AvgNormal[1] * AvgNormal[1] + 
+								AvgNormal[2] * AvgNormal[2]);
+
+		if(AvgLength == 0.0f)
+		{
+			AvgNormal[0] = 0.0f;
+			AvgNormal[1] = 0.0f;
+			AvgNormal[2] = 0.0f;
+		}
+		else
+		{
+			AvgNormal[0] /= AvgLength;
+			AvgNormal[1] /= AvgLength;
+			AvgNormal[2] /= AvgLength;
+		}
+
+		float MinDotProd = 1.0f;
+		for(u32 TriangleIndex = 0;
+			TriangleIndex < Meshlet.TriangleCount;
+			++TriangleIndex)
+		{
+			float DotProd = Normals[TriangleIndex][0] * AvgNormal[0] + 
+							Normals[TriangleIndex][1] * AvgNormal[1] + 
+							Normals[TriangleIndex][2] * AvgNormal[2];
+
+			MinDotProd = DotProd < MinDotProd ? DotProd : MinDotProd;
+		}
+
+		float ConeW = MinDotProd <= 0.0f ? -1.0f : -sqrtf(1.0f - MinDotProd * MinDotProd);
+
+		Meshlet.Cone[0] = AvgNormal[0];
+		Meshlet.Cone[1] = AvgNormal[1];
+		Meshlet.Cone[2] = AvgNormal[2];
+		Meshlet.Cone[3] = ConeW;
+	}
 }
 
 internal void
@@ -152,7 +287,7 @@ VkBool32 DebugReportCallback(VkDebugReportFlagsEXT Flags, VkDebugReportObjectTyp
 	const char* ErrorType = (Flags & VK_DEBUG_REPORT_ERROR_BIT_EXT) ? "Error" :
 							(Flags & VK_DEBUG_REPORT_WARNING_BIT_EXT) ? "Warning" : 
 							(Flags & VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT) ? "Performance Warning" :
-							(Flags & VK_DEBUG_REPORT_DEBUG_BIT_EXT) ? "Debug" : "Unknown";
+							(Flags & VK_DEBUG_REPORT_DEBUG_BIT_EXT) ? "Debug" : "Info";
 
 	char Message[4096];
 	snprintf(Message, 4096, "[%s]: %s\n", ErrorType, pMessage);
@@ -227,7 +362,7 @@ CreateDevice(const VkPhysicalDevice& PhysicalDevice, u32* FamilyIndex)
 	{
 		VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 		VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
-		VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME,
+		"VK_KHR_shader_non_semantic_info",
 		VK_KHR_8BIT_STORAGE_EXTENSION_NAME,
 		VK_KHR_16BIT_STORAGE_EXTENSION_NAME,
 	};
@@ -562,6 +697,7 @@ WinMain(HINSTANCE CurrInst,
 	bool IsMeshLoaded = LoadMesh(Mesh, "..\\assets\\kitten.obj");
 	assert(IsMeshLoaded);
 	BuildMeshlets(Mesh);
+	BuildMeshletCones(Mesh);
 
 	VK_CHECK(volkInitialize());
 	VkInstance Instance = CreateInstance(ClassName);
@@ -569,7 +705,7 @@ WinMain(HINSTANCE CurrInst,
 	VkDebugReportCallbackEXT Callback = 0;
 	VkDebugReportCallbackCreateInfoEXT DebugReportCreateInfo = {VK_STRUCTURE_TYPE_DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT};
 	DebugReportCreateInfo.pfnCallback = DebugReportCallback;
-	DebugReportCreateInfo.flags = VK_DEBUG_REPORT_WARNING_BIT_EXT | VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT | VK_DEBUG_REPORT_ERROR_BIT_EXT | VK_DEBUG_REPORT_DEBUG_BIT_EXT;
+	DebugReportCreateInfo.flags = VK_DEBUG_REPORT_WARNING_BIT_EXT | VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT | VK_DEBUG_REPORT_ERROR_BIT_EXT | VK_DEBUG_REPORT_DEBUG_BIT_EXT | VK_DEBUG_REPORT_INFORMATION_BIT_EXT;
 	VK_CHECK(vkCreateDebugReportCallbackEXT(Instance, &DebugReportCreateInfo, 0, &Callback));
 
 	u32 PhysicalDeviceCount = 0;
@@ -630,9 +766,11 @@ WinMain(HINSTANCE CurrInst,
 	assert(Queue);
 
 	shader ObjectMeshShader = {};
+	shader ObjectTaskShader = {};
 	if(IsRtxSupported)
 	{
 		LoadShader(ObjectMeshShader, Device, "..\\shaders\\object.mesh.spv");
+		LoadShader(ObjectTaskShader, Device, "..\\shaders\\object.task.spv");
 	}
 	shader ObjectVertexShader = {};
 	LoadShader(ObjectVertexShader, Device, "..\\shaders\\object.vert.spv");
@@ -645,16 +783,16 @@ WinMain(HINSTANCE CurrInst,
 	CreateSwapchain(Swapchain, RenderPass, Device, Surface, SurfaceFormat, SurfaceCaps, ClientWidth, ClientHeight, &FamilyIndex);
 
 	VkPipelineCache PipelineCache = 0;
-	VkDescriptorSetLayout MeshDescriptorSetLayout = CreateDescriptorSetLayout(Device, ObjectVertexShader, ObjectFragmentShader);
+	VkDescriptorSetLayout MeshDescriptorSetLayout = CreateDescriptorSetLayout(Device, {&ObjectVertexShader, &ObjectFragmentShader});
 	assert(MeshDescriptorSetLayout);
 
 	VkPipelineLayout MeshLayout = CreatePipelineLayout(Device, MeshDescriptorSetLayout);
 	assert(MeshLayout);
 
-	VkDescriptorUpdateTemplate MeshDescriptorTemplate = CreateDescriptorTemplate(Device, VK_PIPELINE_BIND_POINT_GRAPHICS, MeshLayout, ObjectVertexShader, ObjectFragmentShader);
+	VkDescriptorUpdateTemplate MeshDescriptorTemplate = CreateDescriptorTemplate(Device, VK_PIPELINE_BIND_POINT_GRAPHICS, MeshLayout, {&ObjectVertexShader, &ObjectFragmentShader});
 	assert(MeshDescriptorSetLayout);
 
-	VkPipeline MeshPipeline = CreateGraphicsPipeline(Device, PipelineCache, MeshLayout, RenderPass, ObjectVertexShader, ObjectFragmentShader);
+	VkPipeline MeshPipeline = CreateGraphicsPipeline(Device, PipelineCache, MeshLayout, RenderPass, {&ObjectVertexShader, &ObjectFragmentShader});
 	assert(MeshPipeline);
 
 	VkDescriptorSetLayout RtxDescriptorSetLayout = 0;
@@ -663,16 +801,16 @@ WinMain(HINSTANCE CurrInst,
 	VkPipeline RtxPipeline = 0;
 	if(IsRtxSupported)
 	{
-		RtxDescriptorSetLayout = CreateDescriptorSetLayout(Device, ObjectMeshShader, ObjectFragmentShader);
+		RtxDescriptorSetLayout = CreateDescriptorSetLayout(Device, {&ObjectTaskShader, &ObjectMeshShader, &ObjectFragmentShader});
 		assert(RtxDescriptorSetLayout);
 
 		RtxLayout = CreatePipelineLayout(Device, RtxDescriptorSetLayout);
 		assert(RtxLayout);
 
-		RtxDescriptorTemplate = CreateDescriptorTemplate(Device, VK_PIPELINE_BIND_POINT_GRAPHICS, RtxLayout, ObjectMeshShader, ObjectFragmentShader);
+		RtxDescriptorTemplate = CreateDescriptorTemplate(Device, VK_PIPELINE_BIND_POINT_GRAPHICS, RtxLayout, {&ObjectTaskShader, &ObjectMeshShader, &ObjectFragmentShader});
 		assert(RtxDescriptorTemplate);
 		
-		RtxPipeline = CreateGraphicsPipeline(Device, PipelineCache, RtxLayout, RenderPass, ObjectMeshShader, ObjectFragmentShader);
+		RtxPipeline = CreateGraphicsPipeline(Device, PipelineCache, RtxLayout, RenderPass, {&ObjectTaskShader, &ObjectMeshShader, &ObjectFragmentShader});
 		assert(RtxPipeline);
 	}
 
@@ -770,7 +908,7 @@ WinMain(HINSTANCE CurrInst,
 			descriptor_template DescriptorInfo[2] = {{VertexBuffer.Handle, 0, VertexBuffer.Size}, {MeshletBuffer.Handle, 0, MeshletBuffer.Size}};
 
 			vkCmdPushDescriptorSetWithTemplateKHR(CommandBuffer, RtxDescriptorTemplate, RtxLayout, 0, DescriptorInfo);
-			vkCmdDrawMeshTasksNV(CommandBuffer, u32(Mesh.Meshlets.size()), 0);
+			vkCmdDrawMeshTasksNV(CommandBuffer, (u32)(Mesh.Meshlets.size()), 0);
 		}
 		else
 		{
@@ -779,7 +917,7 @@ WinMain(HINSTANCE CurrInst,
 
 			vkCmdPushDescriptorSetWithTemplateKHR(CommandBuffer, MeshDescriptorTemplate, MeshLayout, 0, DescriptorInfo);
 			vkCmdBindIndexBuffer(CommandBuffer, IndexBuffer.Handle, 0, VK_INDEX_TYPE_UINT32);
-			vkCmdDrawIndexed(CommandBuffer, u32(Mesh.Indices.size()), 1, 0, 0, 0);
+			vkCmdDrawIndexed(CommandBuffer, (u32)Mesh.Indices.size(), 1, 0, 0, 0);
 		}
 
 		vkCmdEndRenderPass(CommandBuffer);
@@ -856,7 +994,9 @@ WinMain(HINSTANCE CurrInst,
 		vkDestroyDescriptorUpdateTemplate(Device, RtxDescriptorTemplate, 0);
 		vkDestroyDescriptorSetLayout(Device, RtxDescriptorSetLayout, 0);
 		vkDestroyPipelineLayout(Device, RtxLayout, 0);
+
 		vkDestroyShaderModule(Device, ObjectMeshShader.Handle, 0);
+		vkDestroyShaderModule(Device, ObjectTaskShader.Handle, 0);
 	}
 
 	vkDestroyShaderModule(Device, ObjectFragmentShader.Handle, 0);
