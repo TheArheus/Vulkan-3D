@@ -6,7 +6,7 @@ struct TsOutput
 
 struct vertex
 {
-	float16_t vx, vy, vz;
+	float vx, vy, vz;
 	uint norm;
 	float16_t tu, tv;
 };
@@ -15,9 +15,15 @@ struct meshlet
 {
 	float4 Cone;
 	uint Vertices[64];
-	uint Indices[126*3]; 
-	uint TriangleCount;
+	uint Triangles[126][3];
 	uint VertexCount;
+	uint TriangleCount;
+};
+
+struct mesh_offset
+{
+	float2 Pos;
+	float2 Scale;
 };
 
 struct VsOutput
@@ -28,6 +34,7 @@ struct VsOutput
 
 [[vk::binding(0)]] StructuredBuffer<vertex> VertexBuffer;
 [[vk::binding(1)]] StructuredBuffer<meshlet> MeshletBuffer;
+[[vk::push_constant]] ConstantBuffer<mesh_offset> MeshOffsetBuffer;
 
 uint Hash(uint a)
 {
@@ -61,6 +68,10 @@ void main(uint3 WorkGroupID : SV_GroupID, uint3 LocalInvocation : SV_GroupThread
 
 	uint nx, ny, nz;
 	uint VertexCount = CurrentMeshlet.VertexCount;
+	uint TriangleCount = CurrentMeshlet.TriangleCount;
+	float3 DrawOffset = float3(MeshOffsetBuffer.Pos.x, MeshOffsetBuffer.Pos.y, 0);
+	float3 DrawScale  = float3(MeshOffsetBuffer.Scale.x, MeshOffsetBuffer.Scale.y, 1);
+
 	for(uint VIndex = ThreadIndex;
 		VIndex < VertexCount;
 		VIndex += 32)
@@ -75,7 +86,7 @@ void main(uint3 WorkGroupID : SV_GroupID, uint3 LocalInvocation : SV_GroupThread
 		float3 Normal = float3(nx, ny, nz) / 127.0 - 1.0;
 		float2 TexCoord = float2(Vertex.tu, Vertex.tv);
 
-		OutVertices[VIndex].Position = float4(Position + float3(0, 0, 0.5), 1.0);
+		OutVertices[VIndex].Position = float4(Position * DrawScale + DrawOffset + float3(0, 0, 0.5), 1.0);
 #if VK_DEBUG
 		OutVertices[VIndex].Color = float4(Color, 1.0f);
 #else
@@ -83,12 +94,11 @@ void main(uint3 WorkGroupID : SV_GroupID, uint3 LocalInvocation : SV_GroupThread
 #endif
 	}
 
-	uint TriangleCount = CurrentMeshlet.TriangleCount;
 	for(uint IIndex = ThreadIndex;
 		IIndex < TriangleCount;
 		IIndex += 32)
 	{
-		OutIndices[IIndex] = uint3(CurrentMeshlet.Indices[IIndex*3+0], CurrentMeshlet.Indices[IIndex*3+1], CurrentMeshlet.Indices[IIndex*3+2]);
+		OutIndices[IIndex] = uint3(CurrentMeshlet.Triangles[IIndex][0], CurrentMeshlet.Triangles[IIndex][1], CurrentMeshlet.Triangles[IIndex][2]);
 	}
 }
 

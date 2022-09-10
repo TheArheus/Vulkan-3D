@@ -21,11 +21,9 @@
 #include "meshoptimizer/overdrawanalyzer.cpp"
 #include "meshoptimizer/overdrawoptimizer.cpp"
 #include "meshoptimizer/simplifier.cpp"
-#include "meshoptimizer/spatialorder.cpp"
 #include "meshoptimizer/vcacheanalyzer.cpp"
 #include "meshoptimizer/vcacheoptimizer.cpp"
 #include "meshoptimizer/vertexcodec.cpp"
-#include "meshoptimizer/vertexfilter.cpp"
 #include "meshoptimizer/vfetchanalyzer.cpp"
 #include "meshoptimizer/vfetchoptimizer.cpp"
 
@@ -57,8 +55,6 @@ typedef s64						bool64;
 		assert(CallResult == VK_SUCCESS); \
 	} while(0);
 
-#include "mesh_loader.h"
-
 global_variable bool IsRunning;
 global_variable bool IsRtxSupported;
 global_variable bool IsRtxEnabled;
@@ -71,6 +67,7 @@ struct shader_layout
 
 #include "shader.h"
 #include "shader.cpp"
+#include "mesh_loader.h"
 
 struct swapchain
 {

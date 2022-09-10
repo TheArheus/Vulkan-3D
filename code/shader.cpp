@@ -96,12 +96,16 @@ ParseShader(shader& Shader, const u32* Code, u32 CodeSize)
 
 	for(auto Var : Vars)
 	{
-		if(Var.IsValid && (Var.StorageClass == SpvStorageClassStorageBuffer || Var.StorageClass == SpvStorageClassUniform))
+		if(Var.IsValid && (Var.StorageClass == SpvStorageClassStorageBuffer || Var.StorageClass == SpvStorageClassUniformConstant))
 		{
 			assert(Var.DescriptorSet == 0);
 			assert(Var.Binding < 32);
-			assert((Shader.StorageBufferMask & (1 << Var.Binding)) == 0);
 			Shader.StorageBufferMask |= 1 << Var.Binding;
+		}
+
+		if(Var.IsValid && (Var.StorageClass == SpvStorageClassPushConstant))
+		{
+			Shader.IsUsingPushConstant = true;
 		}
 	}
 }
@@ -186,13 +190,22 @@ CreateDescriptorSetLayout(VkDevice Device, shaders Shaders)
 }
 
 internal VkPipelineLayout
-CreatePipelineLayout(VkDevice Device, VkDescriptorSetLayout DescriptorSetLayout)
+CreatePipelineLayout(VkDevice Device, VkDescriptorSetLayout DescriptorSetLayout, VkShaderStageFlags PushConstantStages, shaders Shaders, size_t PushConstantSize)
 {
 	VkPipelineLayout Result = {};
 
 	VkPipelineLayoutCreateInfo CreateInfo = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
 	CreateInfo.pSetLayouts = &DescriptorSetLayout;
 	CreateInfo.setLayoutCount = 1;
+
+	VkPushConstantRange ConstantRange = {};
+	if(PushConstantSize)
+	{
+		ConstantRange.stageFlags = PushConstantStages;
+		ConstantRange.size = (u32)PushConstantSize;
+		CreateInfo.pushConstantRangeCount = 1;
+		CreateInfo.pPushConstantRanges = &ConstantRange;
+	}
 
 	VK_CHECK(vkCreatePipelineLayout(Device, &CreateInfo, 0, &Result));
 
@@ -284,7 +297,7 @@ CreateGraphicsPipeline(VkDevice Device, VkPipelineCache PipelineCache, VkPipelin
 
 	VkPipelineRasterizationStateCreateInfo RasterizationState = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
 	RasterizationState.lineWidth = 1.0f;
-	RasterizationState.cullMode = VK_CULL_MODE_FRONT_BIT;
+	RasterizationState.cullMode = VK_CULL_MODE_BACK_BIT;
 
 	VkPipelineDynamicStateCreateInfo DynamicState = {VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
 	VkDynamicState DynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
@@ -310,3 +323,30 @@ CreateGraphicsPipeline(VkDevice Device, VkPipelineCache PipelineCache, VkPipelin
 	VK_CHECK(vkCreateGraphicsPipelines(Device, PipelineCache, 1, &CreateInfo, 0, &Result));
 	return Result;
 }
+
+internal program
+CreateProgram(VkDevice Device, VkPipelineBindPoint BindPoint, VkDescriptorSetLayout SetLayout, shaders Shaders, size_t PushConstantSize)
+{
+	program Result = {};
+
+	for(const shader* Shader : Shaders)
+	{
+		if(Shader->IsUsingPushConstant)
+			Result.Stages |= Shader->Stage;
+	}
+
+	Result.Layout = CreatePipelineLayout(Device, SetLayout, Result.Stages, Shaders, PushConstantSize);
+	assert(Result.Layout);
+	Result.DescriptorTemplate = CreateDescriptorTemplate(Device, BindPoint, Result.Layout, Shaders);
+	assert(Result.DescriptorTemplate);
+
+	return Result;
+}
+
+internal void
+DeleteProgram(program& Program, VkDevice Device)
+{
+	vkDestroyPipelineLayout(Device, Program.Layout, 0);
+	vkDestroyDescriptorUpdateTemplate(Device, Program.DescriptorTemplate, 0);
+}
+

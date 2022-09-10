@@ -10,9 +10,9 @@ struct meshlet
 {
 	float4 Cone;
 	uint Vertices[64];
-	uint Indices[126*3]; 
-	uint TriangleCount;
+	uint Triangles[126][3];
 	uint VertexCount;
+	uint TriangleCount;
 };
 
 bool ConeCullTest(float4 Cone, float3 View)
@@ -20,7 +20,7 @@ bool ConeCullTest(float4 Cone, float3 View)
 	return dot(Cone.xyz, View) < Cone.w;
 }
 
-[[vk::binding(1)]]StructuredBuffer<meshlet> MeshletBuffer;
+[[vk::binding(1)]] StructuredBuffer<meshlet> MeshletBuffer;
 
 groupshared TsOutput TaskOutput;
 groupshared uint MeshletCount;
@@ -36,17 +36,16 @@ void main(uint3 WorkGroupID : SV_GroupID, uint3 LocalInvocation : SV_GroupThread
 #if CULL
     MeshletCount = 0;
 
-    GroupMemoryBarrierWithGroupSync();
-
     meshlet CurrentMeshlet = MeshletBuffer[mi];
-    if(!ConeCullTest(CurrentMeshlet.Cone, float3(0, 0, 1)))
-    {
-        uint CurrentIndex;
-        InterlockedAdd(MeshletCount, 1, CurrentIndex);
-        TaskOutput.Meshlets[CurrentIndex] = mi;
-    }
+    uint Accepted = !ConeCullTest(CurrentMeshlet.Cone, float3(0, 0, 1));
+	uint CurrentIndex = WavePrefixSum(Accepted);
 
-    GroupMemoryBarrierWithGroupSync();
+	if(Accepted)
+	{
+		TaskOutput.Meshlets[CurrentIndex] = mi;
+	}
+
+	MeshletCount = WaveActiveCountBits(Accepted);
 
     if(ti == 0)
     {
