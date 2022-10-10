@@ -1,10 +1,12 @@
 
 internal VkFramebuffer
-CreateFramebuffer(VkDevice Device, VkRenderPass RenderPass, VkImageView View, u32 Width, u32 Height)
+CreateFramebuffer(VkDevice Device, VkRenderPass RenderPass, VkImageView ColorView, VkImageView DepthView, u32 Width, u32 Height)
 {
+	VkImageView AttachmentViews[] = {ColorView, DepthView};
+
 	VkFramebufferCreateInfo FramebufferCreateInfo = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-	FramebufferCreateInfo.pAttachments = &View;
-	FramebufferCreateInfo.attachmentCount = 1;
+	FramebufferCreateInfo.pAttachments = AttachmentViews;
+	FramebufferCreateInfo.attachmentCount = 2;
 	FramebufferCreateInfo.width = Width;
 	FramebufferCreateInfo.height = Height;
 	FramebufferCreateInfo.renderPass = RenderPass;
@@ -17,11 +19,13 @@ CreateFramebuffer(VkDevice Device, VkRenderPass RenderPass, VkImageView View, u3
 internal VkImageView
 CreateImageView(VkDevice Device, VkImage Image, VkFormat Format)
 {
+	VkImageAspectFlags Aspect = (Format == VK_FORMAT_D32_SFLOAT) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+
 	VkImageViewCreateInfo CreateInfo = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
 	CreateInfo.format = Format;
 	CreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
 	CreateInfo.image = Image;
-	CreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	CreateInfo.subresourceRange.aspectMask = Aspect;
 	CreateInfo.subresourceRange.layerCount = 1;
 	CreateInfo.subresourceRange.levelCount = 1;
 
@@ -47,7 +51,7 @@ CreateSwapchain(VkDevice Device, VkSurfaceKHR Surface, VkSurfaceFormatKHR Surfac
 	SwapchainCreateInfo.imageExtent.width = Width;
 	SwapchainCreateInfo.imageExtent.height = Height;
 	SwapchainCreateInfo.imageArrayLayers = 1;
-	SwapchainCreateInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+	SwapchainCreateInfo.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 	SwapchainCreateInfo.queueFamilyIndexCount = 1;
 	SwapchainCreateInfo.pQueueFamilyIndices = FamilyIndex;
 	SwapchainCreateInfo.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
@@ -71,54 +75,31 @@ CreateSwapchain(swapchain& Swapchain, VkRenderPass RenderPass, VkDevice Device, 
 	std::vector<VkImage> SwapchainImages(SwapchainImageCount);
 	vkGetSwapchainImagesKHR(Device, Swapchain.Handle, &SwapchainImageCount, SwapchainImages.data());
 	Swapchain.Images = std::move(SwapchainImages);
-
-	std::vector<VkImageView> SwapchainImageViews(SwapchainImageCount);
-	for(u32 ImageViewIndex = 0;
-		ImageViewIndex < SwapchainImageViews.size();
-		++ImageViewIndex)
-	{
-		SwapchainImageViews[ImageViewIndex] = CreateImageView(Device, Swapchain.Images[ImageViewIndex], SurfaceFormat.format);
-		assert(SwapchainImageViews[ImageViewIndex]);
-	}
-	Swapchain.ImageViews = std::move(SwapchainImageViews);
-
-	std::vector<VkFramebuffer> Framebuffers(SwapchainImageCount);
-	for(u32 FramebufferIndex = 0;
-		FramebufferIndex < Framebuffers.size();
-		++FramebufferIndex)
-	{
-		Framebuffers[FramebufferIndex] = CreateFramebuffer(Device, RenderPass, Swapchain.ImageViews[FramebufferIndex], Width, Height);
-		assert(Framebuffers[FramebufferIndex]);
-	}
-	Swapchain.Framebuffers = std::move(Framebuffers);
 }
 
 internal void
 DestroySwapchain(const swapchain& Swapchain, VkDevice Device)
 {
-	for(u32 FramebufferIndex = 0;
-		FramebufferIndex < Swapchain.Framebuffers.size();
-		++FramebufferIndex)
-	{
-		vkDestroyFramebuffer(Device, Swapchain.Framebuffers[FramebufferIndex], 0);
-	}
-
-	for(u32 ImageViewIndex = 0;
-		ImageViewIndex < Swapchain.ImageViews.size();
-		++ImageViewIndex)
-	{
-		vkDestroyImageView(Device, Swapchain.ImageViews[ImageViewIndex], 0);
-	}
-
 	vkDestroySwapchainKHR(Device, Swapchain.Handle, 0);
 }
 
-internal void 
-ResizeSwapchain(swapchain& Result, VkRenderPass RenderPass, VkDevice Device, VkSurfaceKHR Surface, VkSurfaceFormatKHR SurfaceFormat, VkSurfaceCapabilitiesKHR SurfaceCaps, u32 Width, u32 Height, u32* FamilyIndex)
+internal bool
+ResizeSwapchain(swapchain& Result, VkPhysicalDevice PhysicalDevice, VkRenderPass RenderPass, VkDevice Device, VkSurfaceKHR Surface, VkSurfaceFormatKHR SurfaceFormat, VkSurfaceCapabilitiesKHR SurfaceCaps, u32* FamilyIndex)
 {
+	VkSurfaceCapabilitiesKHR ResizeCaps;
+	VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(PhysicalDevice, Surface, &ResizeCaps));
+	u32 NewWidth = ResizeCaps.currentExtent.width;
+	u32 NewHeight = ResizeCaps.currentExtent.height;
+	if(NewWidth == Result.Width && NewHeight == Result.Height)
+	{
+		return false;
+	}
+
 	VkSwapchainKHR OldSwapchain = Result.Handle;
 	swapchain Old = Result;
-	CreateSwapchain(Result, RenderPass, Device, Surface, SurfaceFormat, SurfaceCaps, Width, Height, FamilyIndex, OldSwapchain);
+	CreateSwapchain(Result, RenderPass, Device, Surface, SurfaceFormat, SurfaceCaps, NewWidth, NewHeight, FamilyIndex, OldSwapchain);
 	VK_CHECK(vkDeviceWaitIdle(Device));
 	DestroySwapchain(Old, Device);
+
+	return true;
 }

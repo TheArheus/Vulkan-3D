@@ -1,29 +1,9 @@
 
+#include "mesh_headers.hlsl"
+
 struct TsOutput
 {
 	uint Meshlets[32];
-};
-
-struct vertex
-{
-	float vx, vy, vz;
-	uint norm;
-	float16_t tu, tv;
-};
-
-struct meshlet
-{
-	float4 Cone;
-	uint Vertices[64];
-	uint Triangles[126][3];
-	uint VertexCount;
-	uint TriangleCount;
-};
-
-struct mesh_offset
-{
-	float2 Pos;
-	float2 Scale;
 };
 
 struct VsOutput
@@ -32,9 +12,10 @@ struct VsOutput
 	float4 Color : COLOR;
 };
 
-[[vk::binding(0)]] StructuredBuffer<vertex> VertexBuffer;
-[[vk::binding(1)]] StructuredBuffer<meshlet> MeshletBuffer;
-[[vk::push_constant]] ConstantBuffer<mesh_offset> MeshOffsetBuffer;
+[[vk::binding(0)]] StructuredBuffer<mesh_offset> MeshOffsetBuffer;
+[[vk::binding(1)]] StructuredBuffer<vertex> VertexBuffer;
+[[vk::binding(2)]] StructuredBuffer<meshlet> MeshletBuffer;
+[[vk::push_constant]] ConstantBuffer<globals> Globals;
 
 uint Hash(uint a)
 {
@@ -47,18 +28,17 @@ uint Hash(uint a)
    return a;
 }
 
-bool ConeCullTest(float4 Cone, float3 View)
-{
-	return dot(Cone.xyz, View) < Cone.w;
-}
-
 [numthreads(32, 1, 1)]
 [outputtopology("triangle")]
-void main(uint3 WorkGroupID : SV_GroupID, uint3 LocalInvocation : SV_GroupThreadID, uint ThreadIndex : SV_GroupIndex, in payload TsOutput TaskOutput,
+void main([[vk::builtin("DrawIndex")]] int DrawIndex : A,
+		  uint3 WorkGroupID : SV_GroupID, uint3 LocalInvocation : SV_GroupThreadID, uint ThreadIndex : SV_GroupIndex, in payload TsOutput TaskOutput,
 		  out vertices VsOutput OutVertices[64], out indices uint3 OutIndices[126])
 {
+	;
+
 	uint mi = TaskOutput.Meshlets[WorkGroupID.x];
 	meshlet CurrentMeshlet = MeshletBuffer[mi];
+	mesh_offset MeshOffsetData = MeshOffsetBuffer[DrawIndex];
 
 	SetMeshOutputCounts(CurrentMeshlet.VertexCount, CurrentMeshlet.TriangleCount);
 #if VK_DEBUG
@@ -69,8 +49,10 @@ void main(uint3 WorkGroupID : SV_GroupID, uint3 LocalInvocation : SV_GroupThread
 	uint nx, ny, nz;
 	uint VertexCount = CurrentMeshlet.VertexCount;
 	uint TriangleCount = CurrentMeshlet.TriangleCount;
-	float3 DrawOffset = float3(MeshOffsetBuffer.Pos.x, MeshOffsetBuffer.Pos.y, 0);
-	float3 DrawScale  = float3(MeshOffsetBuffer.Scale.x, MeshOffsetBuffer.Scale.y, 1);
+	float3 DrawOffset = MeshOffsetData.Pos;
+	float3 DrawScale  = float3(MeshOffsetData.Scale, MeshOffsetData.Scale, 1);
+	float4x4 Projection = Globals.Proj;
+	float4 Orientation = MeshOffsetData.Orient;
 
 	for(uint VIndex = ThreadIndex;
 		VIndex < VertexCount;
@@ -86,7 +68,7 @@ void main(uint3 WorkGroupID : SV_GroupID, uint3 LocalInvocation : SV_GroupThread
 		float3 Normal = float3(nx, ny, nz) / 127.0 - 1.0;
 		float2 TexCoord = float2(Vertex.tu, Vertex.tv);
 
-		OutVertices[VIndex].Position = float4(Position * DrawScale + DrawOffset + float3(0, 0, 0.5), 1.0);
+		OutVertices[VIndex].Position = mul(Projection, float4(RotateQuat(Position, Orientation) * DrawScale + DrawOffset, 1.0));
 #if VK_DEBUG
 		OutVertices[VIndex].Color = float4(Color, 1.0f);
 #else

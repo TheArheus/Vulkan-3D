@@ -15,10 +15,26 @@ struct meshlet
 	u32 TriangleCount;
 };
 
+struct alignas(16) globals
+{
+	glm::mat4x4 Projection;
+};
+
 struct alignas(16) mesh_offset
 {
-	float Pos[2];
-	float Scale[2];
+	float Pos[3];
+	float Scale;
+	glm::quat Orient;
+
+	union
+	{
+		u32 CommandData[7];
+		struct
+		{
+			VkDrawIndexedIndirectCommand DrawCommand;
+			VkDrawMeshTasksIndirectCommandNV MeshletDrawCommand;
+		};
+	};
 };
 
 struct meshlet_cone

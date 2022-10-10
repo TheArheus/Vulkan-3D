@@ -290,6 +290,9 @@ CreateGraphicsPipeline(VkDevice Device, VkPipelineCache PipelineCache, VkPipelin
 	ColorBlendState.attachmentCount = 1;
 
 	VkPipelineDepthStencilStateCreateInfo DepthStencilState = {VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+	DepthStencilState.depthTestEnable = true;
+	DepthStencilState.depthWriteEnable = true;
+	DepthStencilState.depthCompareOp = VK_COMPARE_OP_GREATER;
 
 	VkPipelineViewportStateCreateInfo ViewportState = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
 	ViewportState.viewportCount = 1;

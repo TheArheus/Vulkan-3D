@@ -12,6 +12,12 @@
 #include <Volk/volk.h>
 #include <Volk/volk.c>
 
+#include <glm/vec3.hpp>
+#include <glm/vec4.hpp>
+#include <glm/mat4x4.hpp>
+#include <glm/ext/quaternion_float.hpp>
+#include <glm/ext/quaternion_transform.hpp>
+
 // NOTE: remove this if possible
 #include "meshoptimizer/meshoptimizer.h"
 #include "meshoptimizer/allocator.cpp"
@@ -58,6 +64,8 @@ typedef s64						bool64;
 global_variable bool IsRunning;
 global_variable bool IsRtxSupported;
 global_variable bool IsRtxEnabled;
+global_variable bool IsDrawIndirectSupported;
+global_variable bool IsDrawIndirectEnabled;
 
 struct shader_layout 
 {
@@ -72,11 +80,7 @@ struct shader_layout
 struct swapchain
 {
 	VkSwapchainKHR Handle;
-
 	std::vector<VkImage> Images;
-	std::vector<VkImageView> ImageViews;
-	std::vector<VkFramebuffer> Framebuffers;
-
 	u32 Width, Height;
 };
 
@@ -89,4 +93,13 @@ struct buffer
 	void* Data;
 	size_t Size;
 };
+
+struct image
+{
+	VkImage Handle;
+	VkImageView View;
+	VkDeviceMemory Memory;
+};
+
+internal void DispatchMessages();
 

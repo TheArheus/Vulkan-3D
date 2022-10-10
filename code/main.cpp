@@ -1,41 +1,5 @@
 #include "intrinsics.h"
 
-internal void
-DispatchMessages()
-{
-	MSG Message = {};
-	while(PeekMessage(&Message, 0, 0, 0, PM_REMOVE))
-	{
-		switch(Message.message)
-		{
-			case WM_SYSKEYDOWN:
-			case WM_SYSKEYUP:
-			case WM_KEYDOWN:
-			case WM_KEYUP:
-			{
-				u32 KeyCode = (u32)Message.wParam;
-
-				bool IsDown = ((Message.lParam & (1 << 31)) == 0);
-				bool WasDown = ((Message.lParam & (1 << 30)) != 0);
-
-				if(IsDown)
-				{
-					if(KeyCode == 'R')
-					{
-						IsRtxEnabled = !IsRtxEnabled && IsRtxSupported;
-					}
-				}
-			} break;
-
-			default:
-			{
-				TranslateMessage(&Message);
-				DispatchMessage(&Message);
-			} break;
-		}
-	}
-}
-
 VkBool32 DebugReportCallback(VkDebugReportFlagsEXT Flags, VkDebugReportObjectTypeEXT ObjectType, u64 Object, size_t Location, s32 MessageCode, const char* pLayerPrefix, const char* pMessage, void* pUserData)
 {
 	const char* ErrorType = (Flags & VK_DEBUG_REPORT_ERROR_BIT_EXT) ? "Error" :
@@ -136,6 +100,7 @@ CreateDevice(const VkPhysicalDevice& PhysicalDevice, u32* FamilyIndex)
 	QueueCreateInfo.pQueuePriorities = QueuePriorities;
 
 	VkPhysicalDeviceFeatures2 Features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+	Features.features.multiDrawIndirect = true;
 
 	VkPhysicalDevice8BitStorageFeatures Features8 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES};
 	Features8.storageBuffer8BitAccess = true;
@@ -173,16 +138,18 @@ CreateDevice(const VkPhysicalDevice& PhysicalDevice, u32* FamilyIndex)
 }
 
 internal VkRenderPass
-CreateRenderPass(VkDevice Device, VkFormat Format)
+CreateRenderPass(VkDevice Device, VkFormat Format, VkFormat DepthFormat)
 {
 	VkAttachmentReference ColorAttachments = {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+	VkAttachmentReference DepthAttachments = {1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
 
 	VkSubpassDescription Subpass = {};
 	Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
 	Subpass.colorAttachmentCount = 1;
 	Subpass.pColorAttachments = &ColorAttachments;
+	Subpass.pDepthStencilAttachment = &DepthAttachments;
 
-	VkAttachmentDescription Attachment[1] = {};
+	VkAttachmentDescription Attachment[2] = {};
 	Attachment[0].format = Format;
 	Attachment[0].samples = VK_SAMPLE_COUNT_1_BIT;
 	Attachment[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
@@ -192,11 +159,20 @@ CreateRenderPass(VkDevice Device, VkFormat Format)
 	Attachment[0].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 	Attachment[0].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
+	Attachment[1].format = DepthFormat;
+	Attachment[1].samples = VK_SAMPLE_COUNT_1_BIT;
+	Attachment[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	Attachment[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	Attachment[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	Attachment[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	Attachment[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	Attachment[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
 	VkRenderPassCreateInfo RenderPassCreateInfo = {VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
 	RenderPassCreateInfo.pSubpasses = &Subpass;
 	RenderPassCreateInfo.subpassCount = 1;
 	RenderPassCreateInfo.pAttachments = Attachment;
-	RenderPassCreateInfo.attachmentCount = 1;
+	RenderPassCreateInfo.attachmentCount = 2;
 	VkRenderPass Result = 0;
 	vkCreateRenderPass(Device, &RenderPassCreateInfo, 0, &Result);
 	return Result;
@@ -327,7 +303,7 @@ CreateBuffer(buffer& Buffer, VkDevice Device, const VkPhysicalDeviceMemoryProper
 
 	VK_CHECK(vkAllocateMemory(Device, &AllocateInfo, 0, &Buffer.Memory));
 
-	vkBindBufferMemory(Device, Buffer.Handle, Buffer.Memory, 0);
+	VK_CHECK(vkBindBufferMemory(Device, Buffer.Handle, Buffer.Memory, 0));
 
 	if (MemoryFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) 
 	{
@@ -371,6 +347,54 @@ CopyBuffer(buffer& Src, buffer& Dst, const void* Data, size_t Size, VkDevice Dev
 	VK_CHECK(vkDeviceWaitIdle(Device));
 }
 
+internal void
+DestroyBuffer(buffer& Buffer, VkDevice Device)
+{
+	vkFreeMemory(Device, Buffer.Memory, 0);
+	vkDestroyBuffer(Device, Buffer.Handle, 0);
+}
+
+internal void
+CreateImage(image& Result, VkDevice Device, const VkPhysicalDeviceMemoryProperties& MemoryProperties, u32 Width, u32 Height, VkFormat Format, VkImageUsageFlags Usage)
+{
+	VkImageCreateInfo CreateInfo = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+	CreateInfo.format = Format;
+	CreateInfo.imageType = VK_IMAGE_TYPE_2D;
+	CreateInfo.extent = {Width, Height, 1};
+	CreateInfo.mipLevels = 1;
+	CreateInfo.arrayLayers = 1;
+	CreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+	CreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+	CreateInfo.usage = Usage;
+	CreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+	VK_CHECK(vkCreateImage(Device, &CreateInfo, 0, &Result.Handle));
+
+	VkMemoryRequirements Requirements;
+	vkGetImageMemoryRequirements(Device, Result.Handle, &Requirements);
+
+	u32 MemoryTypeIndex = SelectMemoryType(MemoryProperties, Requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	assert(MemoryTypeIndex != ~0u);
+
+	VkMemoryAllocateInfo AllocateInfo = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+	AllocateInfo.memoryTypeIndex = MemoryTypeIndex;
+	AllocateInfo.allocationSize = Requirements.size;
+
+	VK_CHECK(vkAllocateMemory(Device, &AllocateInfo, 0, &Result.Memory));
+
+	VK_CHECK(vkBindImageMemory(Device, Result.Handle, Result.Memory, 0));
+
+	Result.View = CreateImageView(Device, Result.Handle, Format);
+}
+
+internal void
+DestroyImage(image& Image, VkDevice& Device)
+{
+	vkFreeMemory(Device, Image.Memory, 0);
+	vkDestroyImageView(Device, Image.View, 0);
+	vkDestroyImage(Device, Image.Handle, 0);
+}
+
 internal VkQueryPool
 CreateQueryPool(VkDevice Device, VkQueryType Type, uint32_t QueryCount)
 {
@@ -382,18 +406,9 @@ CreateQueryPool(VkDevice Device, VkQueryType Type, uint32_t QueryCount)
 	return Result;
 }
 
-internal void
-DestroyBuffer(buffer& Buffer, VkDevice Device)
-{
-	vkFreeMemory(Device, Buffer.Memory, 0);
-	vkDestroyBuffer(Device, Buffer.Handle, 0);
-}
-
-internal void
-PipelineBarrierImage(VkCommandBuffer CommandBuffer, VkImage Image, 
-					 VkPipelineStageFlags SrcStageMask, VkPipelineStageFlags DstStageMask, 
-					 VkAccessFlags SrcAccess, VkAccessFlags DstAccess, 
-					 VkImageLayout SrcImageLayout, VkImageLayout DstImageLayout)
+internal VkImageMemoryBarrier
+CreateImageBarrier(VkImage Image, VkAccessFlags SrcAccess, VkAccessFlags DstAccess, 
+	   VkImageLayout SrcImageLayout, VkImageLayout DstImageLayout, VkImageAspectFlags AspectMask = VK_IMAGE_ASPECT_COLOR_BIT)
 {
 	VkImageMemoryBarrier ImageMemoryBarrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
 	ImageMemoryBarrier.srcAccessMask = SrcAccess;
@@ -403,10 +418,34 @@ PipelineBarrierImage(VkCommandBuffer CommandBuffer, VkImage Image,
 	ImageMemoryBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	ImageMemoryBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	ImageMemoryBarrier.image = Image;
-	ImageMemoryBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	ImageMemoryBarrier.subresourceRange.aspectMask = AspectMask;
 	ImageMemoryBarrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
 	ImageMemoryBarrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
-	vkCmdPipelineBarrier(CommandBuffer, SrcStageMask, DstStageMask, VK_DEPENDENCY_BY_REGION_BIT, 0, 0, 0, 0, 1, &ImageMemoryBarrier);
+	return ImageMemoryBarrier;
+}
+
+internal void
+ImageBarrier(VkCommandBuffer CommandBuffer, 
+					 VkPipelineStageFlags SrcStageMask, VkPipelineStageFlags DstStageMask,
+					 const std::vector<VkImageMemoryBarrier>& ImageMemoryBarriers)
+{
+	vkCmdPipelineBarrier(CommandBuffer, SrcStageMask, DstStageMask, 
+						 VK_DEPENDENCY_BY_REGION_BIT, 0, 0, 0, 0, 
+						 (u32)ImageMemoryBarriers.size(), ImageMemoryBarriers.data());
+}
+
+glm::mat4x4 GetProjection(float FovY, float Aspect, float ZNear)
+{
+	float f = 1.0f / tanf(0.5f * FovY);
+	glm::mat4x4 Proj(0);
+
+	Proj[0][0] = Aspect * f;
+	Proj[1][1] = f;
+	Proj[2][2] = 0.0f;
+	Proj[2][3] = 1.0f;
+	Proj[3][2] = ZNear;
+
+	return Proj;
 }
 
 LRESULT CALLBACK WindowProc(HWND Wnd, UINT Msg, WPARAM wParam, LPARAM lParam);
@@ -530,7 +569,7 @@ WinMain(HINSTANCE CurrInst,
 	shader ObjectFragmentShader = {};
 	LoadShader(ObjectFragmentShader, Device, "..\\shaders\\object.frag.spv");
 
-	VkRenderPass RenderPass = CreateRenderPass(Device, SurfaceFormat.format);
+	VkRenderPass RenderPass = CreateRenderPass(Device, SurfaceFormat.format, VK_FORMAT_D32_SFLOAT);
 	assert(RenderPass);
 	swapchain Swapchain;
 	CreateSwapchain(Swapchain, RenderPass, Device, Surface, SurfaceFormat, SurfaceCaps, ClientWidth, ClientHeight, &FamilyIndex);
@@ -539,7 +578,7 @@ WinMain(HINSTANCE CurrInst,
 	VkDescriptorSetLayout MeshDescriptorSetLayout = CreateDescriptorSetLayout(Device, {&ObjectVertexShader, &ObjectFragmentShader});
 	assert(MeshDescriptorSetLayout);
 
-	program MeshProgram = CreateProgram(Device, VK_PIPELINE_BIND_POINT_GRAPHICS, MeshDescriptorSetLayout, {&ObjectVertexShader, &ObjectFragmentShader}, sizeof(mesh_offset));
+	program MeshProgram = CreateProgram(Device, VK_PIPELINE_BIND_POINT_GRAPHICS, MeshDescriptorSetLayout, {&ObjectVertexShader, &ObjectFragmentShader}, sizeof(globals));
 
 	VkPipeline MeshPipeline = CreateGraphicsPipeline(Device, PipelineCache, MeshProgram.Layout, RenderPass, {&ObjectVertexShader, &ObjectFragmentShader});
 	assert(MeshPipeline);
@@ -552,7 +591,7 @@ WinMain(HINSTANCE CurrInst,
 		RtxDescriptorSetLayout = CreateDescriptorSetLayout(Device, {&ObjectTaskShader, &ObjectMeshShader, &ObjectFragmentShader});
 		assert(RtxDescriptorSetLayout);
 
-		RtxProgram = CreateProgram(Device, VK_PIPELINE_BIND_POINT_GRAPHICS, RtxDescriptorSetLayout, {&ObjectTaskShader, &ObjectMeshShader, &ObjectFragmentShader}, sizeof(mesh_offset));
+		RtxProgram = CreateProgram(Device, VK_PIPELINE_BIND_POINT_GRAPHICS, RtxDescriptorSetLayout, {&ObjectTaskShader, &ObjectMeshShader, &ObjectFragmentShader}, sizeof(globals));
 		
 		RtxPipeline = CreateGraphicsPipeline(Device, PipelineCache, RtxProgram.Layout, RenderPass, {&ObjectTaskShader, &ObjectMeshShader, &ObjectFragmentShader});
 		assert(RtxPipeline);
@@ -581,7 +620,7 @@ WinMain(HINSTANCE CurrInst,
 	buffer ScratchBuffer = {};
 	CreateBuffer(ScratchBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
-	buffer VertexBuffer = {}, IndexBuffer = {}, MeshletBuffer = {}, MeshletDataBuffer = {};
+	buffer VertexBuffer = {}, IndexBuffer = {}, MeshletBuffer = {}, MeshletDataBuffer = {}, DrawBuffer = {};
 	CreateBuffer(VertexBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 	CopyBuffer(ScratchBuffer, VertexBuffer, Mesh.Vertices.data(), sizeof(vertex) * Mesh.Vertices.size(), Device, CommandPool, CommandBuffer, Queue);
 
@@ -594,19 +633,57 @@ WinMain(HINSTANCE CurrInst,
 		CopyBuffer(ScratchBuffer, MeshletBuffer, Mesh.Meshlets.data(), sizeof(meshlet) * Mesh.Meshlets.size(), Device, CommandPool, CommandBuffer, Queue);
 	}
 
+	VkFramebuffer TargetFramebuffer = 0;
+	image ColorTarget = {}, DepthTarget = {};
+
 	double CpuAvgTime = 0;
 	double GpuAvgTime = 0;
+
+	srand(42);
+	
+	u32 DrawCount = 2000;
+	std::vector<mesh_offset> DrawOffsets(DrawCount);
+
+	for(u32 DrawIndex = 0;
+		DrawIndex < DrawCount;
+		++DrawIndex)
+	{
+		DrawOffsets[DrawIndex].Pos[0] = float(rand()) / RAND_MAX * 80 - 20;
+		DrawOffsets[DrawIndex].Pos[1] = float(rand()) / RAND_MAX * 80 - 20;
+		DrawOffsets[DrawIndex].Pos[2] = float(rand()) / RAND_MAX * 80 - 20;
+		DrawOffsets[DrawIndex].Scale  = (float(rand()) / RAND_MAX) * 5 + 1;
+
+		glm::vec3 Axis{(float(rand()) / RAND_MAX) * 2 - 1};
+		float Angle = glm::radians((float(rand()) / RAND_MAX) * 90.0f);
+
+		DrawOffsets[DrawIndex].Orient = glm::rotate(glm::quat(1, 0, 0, 0), Angle, Axis);
+
+		DrawOffsets[DrawIndex].DrawCommand.indexCount = u32(Mesh.Indices.size());
+		DrawOffsets[DrawIndex].DrawCommand.instanceCount = 1;
+		DrawOffsets[DrawIndex].MeshletDrawCommand.taskCount = u32(Mesh.Meshlets.size()/32);
+	}
+
+	CreateBuffer(DrawBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	CopyBuffer(ScratchBuffer, DrawBuffer, DrawOffsets.data(), sizeof(mesh_offset) * DrawOffsets.size(), Device, CommandPool, CommandBuffer, Queue);
 
 	while(IsRunning)
 	{
 		DispatchMessages();
 		QueryPerformanceCounter(&BegTime);
 
-		VkSurfaceCapabilitiesKHR ResizeCaps;
-		VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(PhysicalDevice, Surface, &ResizeCaps));
-		if(ResizeCaps.currentExtent.width != Swapchain.Width || ResizeCaps.currentExtent.height != Swapchain.Height)
+		if(ResizeSwapchain(Swapchain, PhysicalDevice, RenderPass, Device, Surface, SurfaceFormat, SurfaceCaps, &FamilyIndex) || !TargetFramebuffer)
 		{
-			ResizeSwapchain(Swapchain, RenderPass, Device, Surface, SurfaceFormat, SurfaceCaps, ResizeCaps.currentExtent.width, ResizeCaps.currentExtent.height, &FamilyIndex);
+			if(ColorTarget.Handle)
+				DestroyImage(ColorTarget, Device);
+			if(DepthTarget.Handle)
+				DestroyImage(DepthTarget, Device);
+			if(TargetFramebuffer)
+				vkDestroyFramebuffer(Device, TargetFramebuffer, 0);
+
+			CreateImage(ColorTarget, Device, MemoryProperties, Swapchain.Width, Swapchain.Height, SurfaceFormat.format, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+			CreateImage(DepthTarget, Device, MemoryProperties, Swapchain.Width, Swapchain.Height, VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+
+			TargetFramebuffer = CreateFramebuffer(Device, RenderPass, ColorTarget.View, DepthTarget.View, Swapchain.Width, Swapchain.Height);
 		}
 
 		u32 ImageIndex = 0;
@@ -620,19 +697,25 @@ WinMain(HINSTANCE CurrInst,
 
 		vkCmdResetQueryPool(CommandBuffer, QueryPool, 0, 128);
 		vkCmdWriteTimestamp(CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, QueryPool, 0);
+		std::vector<VkImageMemoryBarrier> ImageBeginRenderBarriers = 
+		{
+			CreateImageBarrier(ColorTarget.Handle, 0, 0, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL),
+			CreateImageBarrier(DepthTarget.Handle, 0, 0, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT),
+		};
 
-		PipelineBarrierImage(CommandBuffer, Swapchain.Images[ImageIndex], VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+		ImageBarrier(CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT|VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, ImageBeginRenderBarriers);
 
-		VkClearValue ClearColor = {};
-		ClearColor.color = {48./255., 25/255., 86/255., 1};
+		VkClearValue ClearColor[2] = {};
+		ClearColor[0].color = {48./255., 25/255., 86/255., 1};
+		ClearColor[1].depthStencil = {0, 0};
 
 		VkRenderPassBeginInfo RenderPassBeginInfo = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-		RenderPassBeginInfo.framebuffer = Swapchain.Framebuffers[ImageIndex];
+		RenderPassBeginInfo.framebuffer = TargetFramebuffer;
 		RenderPassBeginInfo.renderPass = RenderPass;
 		RenderPassBeginInfo.renderArea.extent.width = Swapchain.Width;
 		RenderPassBeginInfo.renderArea.extent.height = Swapchain.Height;
-		RenderPassBeginInfo.clearValueCount = 1;
-		RenderPassBeginInfo.pClearValues = &ClearColor;
+		RenderPassBeginInfo.clearValueCount = 2;
+		RenderPassBeginInfo.pClearValues = ClearColor;
 		vkCmdBeginRenderPass(CommandBuffer, &RenderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
 
 		VkViewport Viewport = {0, (float)Swapchain.Height, (float)Swapchain.Width, -(float)Swapchain.Height, 0, 1};
@@ -640,18 +723,10 @@ WinMain(HINSTANCE CurrInst,
 		vkCmdSetViewport(CommandBuffer, 0, 1, &Viewport);
 		vkCmdSetScissor(CommandBuffer, 0, 1, &Scissor);
 
-		u32 DrawCount = 100;
-		std::vector<mesh_offset> DrawOffsets(DrawCount);
+		glm::mat4x4 Projection = GetProjection(3.14159265f / 3.0f, (float)Swapchain.Height / (float)Swapchain.Width, 0.01f);
 
-		for(u32 DrawIndex = 0;
-			DrawIndex < DrawCount;
-			++DrawIndex)
-		{
-			DrawOffsets[DrawIndex].Pos[0] = float(DrawIndex % 10) / 10.f * 2.0f - 1.0f;// + 1.f / 9.0f;
-			DrawOffsets[DrawIndex].Pos[1] = float(DrawIndex / 10) / 10.f * 2.0f - 1.0f;// + 1.f / 9.0f;
-			DrawOffsets[DrawIndex].Scale[0] = 1.0f / 10.f;
-			DrawOffsets[DrawIndex].Scale[1] = 1.0f / 10.f;
-		}
+		globals Globals = {};
+		Globals.Projection = Projection;
 
 		if(IsRtxEnabled)
 		{
@@ -662,40 +737,57 @@ WinMain(HINSTANCE CurrInst,
 			MeshletBufferInfo.offset = 0;
 			MeshletBufferInfo.range = MeshletBuffer.Size;
 
-			descriptor_template DescriptorInfo[2] = {{VertexBuffer.Handle, 0, VertexBuffer.Size}, 
-													 {MeshletBuffer.Handle, 0, MeshletBuffer.Size}};
+			descriptor_template DescriptorInfo[3] = {{DrawBuffer.Handle, 0, DrawBuffer.Size},
+													{VertexBuffer.Handle, 0, VertexBuffer.Size}, 
+													{MeshletBuffer.Handle, 0, MeshletBuffer.Size}};
 
 			vkCmdPushDescriptorSetWithTemplateKHR(CommandBuffer, RtxProgram.DescriptorTemplate, RtxProgram.Layout, 0, DescriptorInfo);
 
-			for(mesh_offset DrawOffset : DrawOffsets)
-			{
-				vkCmdPushConstants(CommandBuffer, RtxProgram.Layout, RtxProgram.Stages, 0, sizeof(mesh_offset), &DrawOffset);
-				vkCmdDrawMeshTasksNV(CommandBuffer, (u32)(Mesh.Meshlets.size()/32), 0);
-			}
+			vkCmdPushConstants(CommandBuffer, RtxProgram.Layout, RtxProgram.Stages, 0, sizeof(globals), &Globals);
+			vkCmdDrawMeshTasksIndirectNV(CommandBuffer, DrawBuffer.Handle, offsetof(mesh_offset, MeshletDrawCommand), u32(DrawOffsets.size()), sizeof(mesh_offset));
 		}
 		else
 		{
 			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, MeshPipeline);
-			descriptor_template DescriptorInfo[1] = {{VertexBuffer.Handle, 0, VertexBuffer.Size}};
+			descriptor_template DescriptorInfo[2] = {{DrawBuffer.Handle, 0, DrawBuffer.Size},
+													{VertexBuffer.Handle, 0, VertexBuffer.Size}};
 
 			vkCmdPushDescriptorSetWithTemplateKHR(CommandBuffer, MeshProgram.DescriptorTemplate, MeshProgram.Layout, 0, DescriptorInfo);
 			vkCmdBindIndexBuffer(CommandBuffer, IndexBuffer.Handle, 0, VK_INDEX_TYPE_UINT32);
 
-			for(mesh_offset DrawOffset : DrawOffsets)
-			{
-				vkCmdPushConstants(CommandBuffer, MeshProgram.Layout, MeshProgram.Stages, 0, sizeof(mesh_offset), &DrawOffset);
-				vkCmdDrawIndexed(CommandBuffer, (u32)Mesh.Indices.size(), 1, 0, 0, 0);
-			}
+			vkCmdPushConstants(CommandBuffer, MeshProgram.Layout, MeshProgram.Stages, 0, sizeof(globals), &Globals);
+			vkCmdDrawIndexedIndirect(CommandBuffer, DrawBuffer.Handle, offsetof(mesh_offset, DrawCommand), u32(DrawOffsets.size()), sizeof(mesh_offset));
 		}
 
 		vkCmdEndRenderPass(CommandBuffer);
-		PipelineBarrierImage(CommandBuffer, Swapchain.Images[ImageIndex], VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+
+		std::vector<VkImageMemoryBarrier> ImageCopyBarriers = 
+		{
+			CreateImageBarrier(ColorTarget.Handle, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL),
+			CreateImageBarrier(Swapchain.Images[ImageIndex], 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL),
+		};
+
+		ImageBarrier(CommandBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, ImageCopyBarriers);
+
+		VkImageCopy ImageCopyRegion = {};
+		ImageCopyRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		ImageCopyRegion.srcSubresource.layerCount = 1;
+		ImageCopyRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		ImageCopyRegion.dstSubresource.layerCount = 1;
+		ImageCopyRegion.extent = {Swapchain.Width, Swapchain.Height, 1};
+		vkCmdCopyImage(CommandBuffer, ColorTarget.Handle, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, Swapchain.Images[ImageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &ImageCopyRegion);
 
 		vkCmdWriteTimestamp(CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, QueryPool, 1);
 
+		std::vector<VkImageMemoryBarrier> ImagePresentBarrier = 
+		{
+			CreateImageBarrier(Swapchain.Images[ImageIndex], VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR),
+		};
+		ImageBarrier(CommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, ImagePresentBarrier);
+
 		vkEndCommandBuffer(CommandBuffer);
 
-		VkPipelineStageFlags SubmitStageFlag = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		VkPipelineStageFlags SubmitStageFlag = VK_PIPELINE_STAGE_TRANSFER_BIT;
 		VkSubmitInfo SubmitInfo = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
 		SubmitInfo.pWaitDstStageMask = &SubmitStageFlag;
 		SubmitInfo.commandBufferCount = 1;
@@ -733,6 +825,10 @@ WinMain(HINSTANCE CurrInst,
 				Mesh.Meshlets.size());
 		SetWindowTextA(Window, Title);
 	}
+
+	vkDestroyFramebuffer(Device, TargetFramebuffer, 0);
+	DestroyImage(ColorTarget, Device);
+	DestroyImage(DepthTarget, Device);
 
 	if(IsRtxSupported)
 	{
@@ -780,7 +876,8 @@ WinMain(HINSTANCE CurrInst,
 	return 0;
 }
 
-LRESULT CALLBACK WindowProc(HWND Wnd, UINT Msg, WPARAM wParam, LPARAM lParam)
+LRESULT CALLBACK 
+WindowProc(HWND Wnd, UINT Msg, WPARAM wParam, LPARAM lParam)
 {
 	LRESULT Result = 0;
 	switch(Msg)
@@ -804,6 +901,47 @@ LRESULT CALLBACK WindowProc(HWND Wnd, UINT Msg, WPARAM wParam, LPARAM lParam)
 	}
 
 	return Result;
+}
+
+internal void
+DispatchMessages()
+{
+	MSG Message = {};
+	while(PeekMessage(&Message, 0, 0, 0, PM_REMOVE))
+	{
+		switch(Message.message)
+		{
+			case WM_SYSKEYDOWN:
+			case WM_SYSKEYUP:
+			case WM_KEYDOWN:
+			case WM_KEYUP:
+			{
+				u32 KeyCode = (u32)Message.wParam;
+
+				bool IsDown = ((Message.lParam & (1 << 31)) == 0);
+				bool WasDown = ((Message.lParam & (1 << 30)) != 0);
+
+				if(IsDown)
+				{
+					if(KeyCode == 'R')
+					{
+						IsRtxEnabled = !IsRtxEnabled && IsRtxSupported;
+					}
+
+					if(KeyCode == 'T')
+					{
+						IsDrawIndirectEnabled = !IsDrawIndirectEnabled && IsDrawIndirectSupported;
+					}
+				}
+			} break;
+
+			default:
+			{
+				TranslateMessage(&Message);
+				DispatchMessage(&Message);
+			} break;
+		}
+	}
 }
 
 // NOTE: Only when console output is needed
