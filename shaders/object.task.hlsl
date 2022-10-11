@@ -23,14 +23,21 @@ void main([[vk::builtin("DrawIndex")]] int DrawIndex : A,
 {
 	uint ti  = LocalInvocation.x;
 	uint mgi = WorkGroupID.x;
-	uint mi = mgi * 32 + ti;
+
 	mesh_offset MeshOffsetData = MeshOffsetBuffer[DrawIndex];
 
-#if CULL
-    MeshletCount = 0;
+	uint mi = mgi * 32 + ti + MeshOffsetData.MeshletOffset;
 
-    meshlet CurrentMeshlet = MeshletBuffer[mi];
-    uint Accepted = !ConeCullTest(RotateQuat(CurrentMeshlet.Cone.xyz, MeshOffsetData.Orient), CurrentMeshlet.Cone.w, float3(0, 0, 1));
+#if CULL
+	uint Accepted = 0;
+	if(mi < MeshOffsetData.MeshletOffset + MeshOffsetData.MeshletCount)
+	{
+		meshlet CurrentMeshlet = MeshletBuffer[mi];
+		Accepted = !ConeCullTest(RotateQuat(CurrentMeshlet.Center, MeshOffsetData.Orient) * MeshOffsetData.Scale + MeshOffsetData.Pos, 
+								 CurrentMeshlet.Radius,
+								 RotateQuat(CurrentMeshlet.ConeAxis, MeshOffsetData.Orient), CurrentMeshlet.ConeCutoff, float3(0, 0, 0));
+	}
+
 	uint CurrentIndex = WavePrefixSum(Accepted);
 
 	if(Accepted)
@@ -38,17 +45,19 @@ void main([[vk::builtin("DrawIndex")]] int DrawIndex : A,
 		TaskOutput.Meshlets[CurrentIndex] = mi;
 	}
 
-	MeshletCount = WaveActiveCountBits(Accepted);
+	uint Count = WaveActiveCountBits(Accepted);
 
     if(ti == 0)
     {
-        DispatchMesh(MeshletCount, 1, 1, TaskOutput);
+        DispatchMesh(Count, 1, 1, TaskOutput);
     }
 #else
 	TaskOutput.Meshlets[ti] = mi;
+
 	if(ti == 0)
 	{
-		DispatchMesh(32, 1, 1, TaskOutput);
+		uint Count = min(32, MeshOffsetData.MeshletCount - mi);
+		DispatchMesh(Count, 1, 1, TaskOutput);
 	}
 #endif
 }

@@ -10,6 +10,7 @@ struct shader
 struct program
 {
 	VkPipelineLayout Layout;
+	VkDescriptorSetLayout DescriptorSetLayout;
 	VkDescriptorUpdateTemplate DescriptorTemplate;
 	VkShaderStageFlags Stages;
 };

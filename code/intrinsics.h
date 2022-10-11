@@ -64,8 +64,6 @@ typedef s64						bool64;
 global_variable bool IsRunning;
 global_variable bool IsRtxSupported;
 global_variable bool IsRtxEnabled;
-global_variable bool IsDrawIndirectSupported;
-global_variable bool IsDrawIndirectEnabled;
 
 struct shader_layout 
 {

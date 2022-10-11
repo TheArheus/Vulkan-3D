@@ -13,6 +13,10 @@ GetShaderStage(SpvExecutionModel ExecutionModel)
 {
 	switch(ExecutionModel)
 	{
+		case SpvExecutionModelGLCompute:
+		{
+			return VK_SHADER_STAGE_COMPUTE_BIT;
+		} break;
 		case SpvExecutionModelVertex:
 		{
 			return VK_SHADER_STAGE_VERTEX_BIT;
@@ -300,7 +304,7 @@ CreateGraphicsPipeline(VkDevice Device, VkPipelineCache PipelineCache, VkPipelin
 
 	VkPipelineRasterizationStateCreateInfo RasterizationState = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
 	RasterizationState.lineWidth = 1.0f;
-	RasterizationState.cullMode = VK_CULL_MODE_BACK_BIT;
+	RasterizationState.cullMode = VK_CULL_MODE_FRONT_BIT;
 
 	VkPipelineDynamicStateCreateInfo DynamicState = {VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
 	VkDynamicState DynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
@@ -328,7 +332,7 @@ CreateGraphicsPipeline(VkDevice Device, VkPipelineCache PipelineCache, VkPipelin
 }
 
 internal program
-CreateProgram(VkDevice Device, VkPipelineBindPoint BindPoint, VkDescriptorSetLayout SetLayout, shaders Shaders, size_t PushConstantSize)
+CreateProgram(VkDevice Device, VkPipelineBindPoint BindPoint, shaders Shaders, size_t PushConstantSize)
 {
 	program Result = {};
 
@@ -338,8 +342,12 @@ CreateProgram(VkDevice Device, VkPipelineBindPoint BindPoint, VkDescriptorSetLay
 			Result.Stages |= Shader->Stage;
 	}
 
-	Result.Layout = CreatePipelineLayout(Device, SetLayout, Result.Stages, Shaders, PushConstantSize);
+	Result.DescriptorSetLayout = CreateDescriptorSetLayout(Device, Shaders);
+	assert(Result.DescriptorSetLayout);
+
+	Result.Layout = CreatePipelineLayout(Device, Result.DescriptorSetLayout, Result.Stages, Shaders, PushConstantSize);
 	assert(Result.Layout);
+
 	Result.DescriptorTemplate = CreateDescriptorTemplate(Device, BindPoint, Result.Layout, Shaders);
 	assert(Result.DescriptorTemplate);
 
@@ -349,7 +357,30 @@ CreateProgram(VkDevice Device, VkPipelineBindPoint BindPoint, VkDescriptorSetLay
 internal void
 DeleteProgram(program& Program, VkDevice Device)
 {
+	vkDestroyDescriptorSetLayout(Device, Program.DescriptorSetLayout, 0);
 	vkDestroyPipelineLayout(Device, Program.Layout, 0);
 	vkDestroyDescriptorUpdateTemplate(Device, Program.DescriptorTemplate, 0);
+}
+
+internal VkPipeline 
+CreateComputePipeline(VkDevice Device, VkPipelineCache PipelineCache, VkPipelineLayout Layout, shader Shader)
+{
+	assert(Shader.Stage == VK_SHADER_STAGE_COMPUTE_BIT);
+
+	VkPipeline Pipeline = 0;
+	VkComputePipelineCreateInfo CreateInfo = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+
+	VkPipelineShaderStageCreateInfo Stage = {};
+
+	Stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	Stage.module = Shader.Handle;
+	Stage.stage = Shader.Stage;
+	Stage.pName = "main";
+
+	CreateInfo.stage = Stage;
+	CreateInfo.layout = Layout;
+	vkCreateComputePipelines(Device, PipelineCache, 1, &CreateInfo, 0, &Pipeline);
+
+	return Pipeline;
 }
 

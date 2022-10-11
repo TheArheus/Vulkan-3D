@@ -58,7 +58,7 @@ void main([[vk::builtin("DrawIndex")]] int DrawIndex : A,
 		VIndex < VertexCount;
 		VIndex += 32)
 	{
-		uint CurrentVertex = CurrentMeshlet.Vertices[VIndex];
+		uint CurrentVertex = CurrentMeshlet.Vertices[VIndex] + MeshOffsetData.VertexOffset;
 
 		vertex Vertex = VertexBuffer[CurrentVertex];
 		float3 Position = float3(Vertex.vx, Vertex.vy, Vertex.vz);
