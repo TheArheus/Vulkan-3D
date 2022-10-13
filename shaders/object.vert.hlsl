@@ -8,12 +8,13 @@ struct VsOutput
 };
 
 [[vk::binding(0)]] StructuredBuffer<mesh_offset> MeshOffsetBuffer;
-[[vk::binding(1)]] StructuredBuffer<vertex> VertexBuffer;
+[[vk::binding(1)]] StructuredBuffer<mesh_draw_command> DrawCommands;
+[[vk::binding(2)]] StructuredBuffer<vertex> VertexBuffer;
 [[vk::push_constant]] ConstantBuffer<globals> Globals;
 
 VsOutput main([[vk::builtin("DrawIndex")]] int DrawIndex : A, uint VertexIndex:SV_VertexID)
 {
-	mesh_offset MeshOffsetData = MeshOffsetBuffer[DrawIndex];
+	mesh_offset MeshOffsetData = MeshOffsetBuffer[DrawCommands[DrawIndex].DrawIndex];
 
 	vertex Vertex = VertexBuffer[VertexIndex];
 	float3 DrawOffset = MeshOffsetData.Pos;

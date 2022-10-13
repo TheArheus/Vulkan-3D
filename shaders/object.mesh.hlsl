@@ -13,8 +13,9 @@ struct VsOutput
 };
 
 [[vk::binding(0)]] StructuredBuffer<mesh_offset> MeshOffsetBuffer;
-[[vk::binding(1)]] StructuredBuffer<vertex> VertexBuffer;
-[[vk::binding(2)]] StructuredBuffer<meshlet> MeshletBuffer;
+[[vk::binding(1)]] StructuredBuffer<mesh_draw_command> DrawCommands;
+[[vk::binding(2)]] StructuredBuffer<vertex> VertexBuffer;
+[[vk::binding(3)]] StructuredBuffer<meshlet> MeshletBuffer;
 [[vk::push_constant]] ConstantBuffer<globals> Globals;
 
 uint Hash(uint a)
@@ -34,11 +35,9 @@ void main([[vk::builtin("DrawIndex")]] int DrawIndex : A,
 		  uint3 WorkGroupID : SV_GroupID, uint3 LocalInvocation : SV_GroupThreadID, uint ThreadIndex : SV_GroupIndex, in payload TsOutput TaskOutput,
 		  out vertices VsOutput OutVertices[64], out indices uint3 OutIndices[126])
 {
-	;
-
 	uint mi = TaskOutput.Meshlets[WorkGroupID.x];
 	meshlet CurrentMeshlet = MeshletBuffer[mi];
-	mesh_offset MeshOffsetData = MeshOffsetBuffer[DrawIndex];
+	mesh_offset MeshOffsetData = MeshOffsetBuffer[DrawCommands[DrawIndex].DrawIndex];
 
 	SetMeshOutputCounts(CurrentMeshlet.VertexCount, CurrentMeshlet.TriangleCount);
 #if VK_DEBUG

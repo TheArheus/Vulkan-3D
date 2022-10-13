@@ -10,7 +10,8 @@ struct TsOutput
 
 
 [[vk::binding(0)]] StructuredBuffer<mesh_offset> MeshOffsetBuffer;
-[[vk::binding(2)]] StructuredBuffer<meshlet> MeshletBuffer;
+[[vk::binding(1)]] StructuredBuffer<mesh_draw_command> DrawCommands;
+[[vk::binding(3)]] StructuredBuffer<meshlet> MeshletBuffer;
 [[vk::push_constant]] ConstantBuffer<globals> Globals;
 
 groupshared TsOutput TaskOutput;
@@ -24,19 +25,15 @@ void main([[vk::builtin("DrawIndex")]] int DrawIndex : A,
 	uint ti  = LocalInvocation.x;
 	uint mgi = WorkGroupID.x;
 
-	mesh_offset MeshOffsetData = MeshOffsetBuffer[DrawIndex];
+	mesh_offset MeshOffsetData = MeshOffsetBuffer[DrawCommands[DrawIndex].DrawIndex];
 
-	uint mi = mgi * 32 + ti + MeshOffsetData.MeshletOffset;
+	uint mi = mgi * 32 + ti;
 
 #if CULL
-	uint Accepted = 0;
-	if(mi < MeshOffsetData.MeshletOffset + MeshOffsetData.MeshletCount)
-	{
-		meshlet CurrentMeshlet = MeshletBuffer[mi];
-		Accepted = !ConeCullTest(RotateQuat(CurrentMeshlet.Center, MeshOffsetData.Orient) * MeshOffsetData.Scale + MeshOffsetData.Pos, 
-								 CurrentMeshlet.Radius,
-								 RotateQuat(CurrentMeshlet.ConeAxis, MeshOffsetData.Orient), CurrentMeshlet.ConeCutoff, float3(0, 0, 0));
-	}
+	meshlet CurrentMeshlet = MeshletBuffer[mi];
+	uint Accepted = !ConeCullTest(RotateQuat(CurrentMeshlet.Center, MeshOffsetData.Orient) * MeshOffsetData.Scale + MeshOffsetData.Pos, 
+							 CurrentMeshlet.Radius,
+							 RotateQuat(CurrentMeshlet.ConeAxis, MeshOffsetData.Orient), CurrentMeshlet.ConeCutoff, float3(0, 0, 0));
 
 	uint CurrentIndex = WavePrefixSum(Accepted);
 
@@ -56,8 +53,7 @@ void main([[vk::builtin("DrawIndex")]] int DrawIndex : A,
 
 	if(ti == 0)
 	{
-		uint Count = min(32, MeshOffsetData.MeshletCount - mi);
-		DispatchMesh(Count, 1, 1, TaskOutput);
+		DispatchMesh(32, 1, 1, TaskOutput);
 	}
 #endif
 }
