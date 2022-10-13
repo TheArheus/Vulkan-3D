@@ -33,8 +33,19 @@ struct alignas(16) mesh_offset
 	glm::vec3 Center;
 	float Radius;
 
+	u32 MeshIndex;
 	u32 VertexOffset;
+};
 
+struct mesh_draw_command
+{
+	u32 DrawIndex;
+	VkDrawIndexedIndirectCommand DrawCommand;
+	VkDrawMeshTasksIndirectCommandNV MeshletDrawCommand;
+};
+
+struct mesh_lod
+{
 	u32 IndexOffset;
 	u32 IndexCount;
 
@@ -42,27 +53,7 @@ struct alignas(16) mesh_offset
 	u32 MeshletCount;
 };
 
-struct mesh_draw_command
-{
-	VkDrawIndexedIndirectCommand DrawCommand;
-	VkDrawMeshTasksIndirectCommandNV MeshletDrawCommand;
-};
-
-struct meshlet_cone
-{
-	float Cone[3];
-	float Angle;
-};
-
-struct build_meshlet_data
-{
-	u32 Vertices[64];
-	u32 Indices[126*3];
-	u32 VertexCount;
-	u32 TriangleCount;
-};
-
-struct mesh
+struct alignas(16) mesh
 {
 	glm::vec3 Center;
 	float Radius;
@@ -70,11 +61,8 @@ struct mesh
 	u32 VertexOffset;
 	u32 VertexCount;
 
-	u32 MeshletOffset;
-	u32 MeshletCount;
-
-	u32 IndexOffset;
-	u32 IndexCount;
+	u32 LodCount;
+	mesh_lod Lods[8];
 };
 
 struct geometry
@@ -84,6 +72,58 @@ struct geometry
 	std::vector<meshlet> Meshlets;
 	std::vector<mesh> Meshes;
 };
+
+internal size_t
+BuildMeshlets(geometry& Result, std::vector<vertex>& Vertices, std::vector<u32>& Indices)
+{
+	u32 MaxVertices = 64;
+	u32 MaxTriangles = 126;
+	std::vector<meshopt_Meshlet> BuildMeshlets(meshopt_buildMeshletsBound(Indices.size(), MaxVertices, MaxTriangles));
+
+	BuildMeshlets.resize(meshopt_buildMeshlets(BuildMeshlets.data(), Indices.data(), Indices.size(), Vertices.size(), MaxVertices, MaxTriangles));
+
+	for(meshopt_Meshlet& BuildMeshletData : BuildMeshlets)
+	{
+		meshlet NewMeshlet = {};
+		meshopt_Bounds Cone = meshopt_computeMeshletBounds(&BuildMeshletData, &Vertices[0].vx, Vertices.size(), sizeof(vertex));
+
+		NewMeshlet.Center[0] = Cone.center[0];
+		NewMeshlet.Center[1] = Cone.center[1];
+		NewMeshlet.Center[2] = Cone.center[2];
+		NewMeshlet.Radius = Cone.radius;
+		NewMeshlet.ConeAxis[0] = Cone.cone_axis[0];
+		NewMeshlet.ConeAxis[1] = Cone.cone_axis[1];
+		NewMeshlet.ConeAxis[2] = Cone.cone_axis[2];
+		NewMeshlet.ConeCutoff = Cone.cone_cutoff;
+		NewMeshlet.VertexCount   = BuildMeshletData.vertex_count;
+		NewMeshlet.TriangleCount = BuildMeshletData.triangle_count;
+
+		for(u32 VertexIndex = 0;
+			VertexIndex < BuildMeshletData.vertex_count;
+			++VertexIndex)
+		{
+			NewMeshlet.Vertices[VertexIndex] = BuildMeshletData.vertices[VertexIndex];
+		}
+
+		for(u32 TriangleIndex = 0;
+			TriangleIndex < BuildMeshletData.triangle_count;
+			++TriangleIndex)
+		{
+			NewMeshlet.Indices[TriangleIndex*3+0] = BuildMeshletData.indices[TriangleIndex][0];
+			NewMeshlet.Indices[TriangleIndex*3+1] = BuildMeshletData.indices[TriangleIndex][1];
+			NewMeshlet.Indices[TriangleIndex*3+2] = BuildMeshletData.indices[TriangleIndex][2];
+		}
+
+		Result.Meshlets.push_back(NewMeshlet);
+	}
+
+	while(Result.Meshlets.size() % 32)
+	{
+		Result.Meshlets.push_back(meshlet());
+	}
+
+	return BuildMeshlets.size();
+}
 
 internal bool
 LoadMesh(geometry& Result, const char* Path, bool MakeMeshlets)
@@ -132,63 +172,13 @@ LoadMesh(geometry& Result, const char* Path, bool MakeMeshlets)
 	meshopt_optimizeVertexCache(Indices.data(), Indices.data(), IndexCount, VertexCount);
 	meshopt_optimizeVertexFetch(Vertices.data(), Indices.data(), IndexCount, Vertices.data(), VertexCount, sizeof(vertex));
 
-	u32 ResultVertexOffset = u32(Result.Vertices.size());
-	u32 ResultVertexCount = (u32)VertexCount;
+	mesh NewMeshData = {};
 
-	u32 ResultIndexOffset = u32(Result.Indices.size());
-	u32 ResultIndexCount = (u32)IndexCount;
+	//meshopt_simplify();
 
+	NewMeshData.VertexOffset = u32(Result.Vertices.size());
+	NewMeshData.VertexCount = (u32)VertexCount;
 	Result.Vertices.insert(Result.Vertices.end(), Vertices.begin(), Vertices.end());
-	Result.Indices.insert(Result.Indices.end(), Indices.begin(), Indices.end());
-
-	u32 ResultMeshletOffset = u32(Result.Meshlets.size());
-	u32 ResultMeshletCount = 0;
-
-	if(MakeMeshlets)
-	{
-		u32 MaxVertices = 64;
-		u32 MaxTriangles = 126;
-		std::vector<meshopt_Meshlet> BuildMeshlets(meshopt_buildMeshletsBound(Indices.size(), MaxVertices, MaxTriangles));
-
-		BuildMeshlets.resize(meshopt_buildMeshlets(BuildMeshlets.data(), Indices.data(), Indices.size(), Vertices.size(), MaxVertices, MaxTriangles));
-
-		for(meshopt_Meshlet& BuildMeshletData : BuildMeshlets)
-		{
-			meshlet NewMeshlet = {};
-			meshopt_Bounds Cone = meshopt_computeMeshletBounds(&BuildMeshletData, &Vertices[0].vx, Vertices.size(), sizeof(vertex));
-
-			NewMeshlet.Center[0] = Cone.center[0];
-			NewMeshlet.Center[1] = Cone.center[1];
-			NewMeshlet.Center[2] = Cone.center[2];
-			NewMeshlet.Radius = Cone.radius;
-			NewMeshlet.ConeAxis[0] = Cone.cone_axis[0];
-			NewMeshlet.ConeAxis[1] = Cone.cone_axis[1];
-			NewMeshlet.ConeAxis[2] = Cone.cone_axis[2];
-			NewMeshlet.ConeCutoff = Cone.cone_cutoff;
-			NewMeshlet.VertexCount   = BuildMeshletData.vertex_count;
-			NewMeshlet.TriangleCount = BuildMeshletData.triangle_count;
-
-			for(u32 VertexIndex = 0;
-				VertexIndex < BuildMeshletData.vertex_count;
-				++VertexIndex)
-			{
-				NewMeshlet.Vertices[VertexIndex] = BuildMeshletData.vertices[VertexIndex];
-			}
-
-			for(u32 TriangleIndex = 0;
-				TriangleIndex < BuildMeshletData.triangle_count;
-				++TriangleIndex)
-			{
-				NewMeshlet.Indices[TriangleIndex*3+0] = BuildMeshletData.indices[TriangleIndex][0];
-				NewMeshlet.Indices[TriangleIndex*3+1] = BuildMeshletData.indices[TriangleIndex][1];
-				NewMeshlet.Indices[TriangleIndex*3+2] = BuildMeshletData.indices[TriangleIndex][2];
-			}
-
-			Result.Meshlets.push_back(NewMeshlet);
-		}
-
-		ResultMeshletCount = u32(BuildMeshlets.size());
-	}
 
 	glm::vec3 Center(0);
 	for(const vertex& Vertex : Vertices)
@@ -205,15 +195,39 @@ LoadMesh(geometry& Result, const char* Path, bool MakeMeshlets)
 		Radius += Radius < NewRadius ? Radius : NewRadius;
 	}
 
-	mesh NewMeshData = {};
-	NewMeshData.Radius		  = Radius;
-	NewMeshData.Center		  = Center;
-	NewMeshData.VertexCount   = ResultVertexCount;
-	NewMeshData.VertexOffset  = ResultVertexOffset;
-	NewMeshData.IndexCount    = ResultIndexCount;
-	NewMeshData.IndexOffset   = ResultIndexOffset;
-	NewMeshData.MeshletCount  = ResultMeshletCount;
-	NewMeshData.MeshletOffset = ResultMeshletOffset;
+	NewMeshData.Radius   = Radius;
+	NewMeshData.Center   = Center;
+
+	u32 LodIndex = 0;
+	std::vector<u32> LodIndices = Indices;
+
+	while(NewMeshData.LodCount < ArraySize(NewMeshData.Lods))
+	{
+		mesh_lod& Lod = NewMeshData.Lods[NewMeshData.LodCount++];
+
+		Lod.IndexOffset   = u32(Result.Indices.size());
+		Lod.IndexCount    = u32(LodIndices.size());
+
+		Result.Indices.insert(Result.Indices.end(), LodIndices.begin(), LodIndices.end());
+
+		Lod.MeshletOffset = u32(Result.Meshlets.size());
+		Lod.MeshletCount  = MakeMeshlets ? (u32)BuildMeshlets(Result, Vertices, LodIndices) : 0;
+
+		if(NewMeshData.LodCount < ArraySize(NewMeshData.Lods))
+		{
+			size_t NextIndicesTarget = size_t(LodIndices.size() * 0.75);
+			size_t NextIndices = meshopt_simplify(LodIndices.data(), LodIndices.data(), LodIndices.size(), &Vertices[0].vx, Vertices.size(), sizeof(vertex), NextIndicesTarget, 1e-4f);
+
+			if(NextIndices == LodIndices.size())
+			{
+				break;
+			}
+
+			LodIndices.resize(NextIndices);
+			meshopt_optimizeVertexCache(LodIndices.data(), LodIndices.data(), LodIndices.size(), VertexCount);
+		}
+	}
+
 	Result.Meshes.push_back(NewMeshData);
 
 	return true;

@@ -6,6 +6,27 @@ struct vertex
 	float16_t tu, tv;
 };
 
+struct mesh_lod
+{
+	uint IndexOffset;
+	uint IndexCount;
+
+	uint MeshletOffset;
+	uint MeshletCount;
+};
+
+struct mesh
+{
+	float3 Center;
+	float Radius;
+
+	uint VertexOffset;
+	uint VertexCount;
+
+	uint LodCount;
+	mesh_lod Lods[8];
+};
+
 struct meshlet
 {
 	float3 Center;
@@ -33,15 +54,14 @@ struct mesh_offset
 	float3 Center;
 	float Radius;
 
+	uint MeshIndex;
 	uint VertexOffset;
-	uint IndexOffset;
-	uint IndexCount;
-	uint MeshletOffset;
-	uint MeshletCount;
 };
 
 struct mesh_draw_command
 {
+	uint DrawIndex;
+
 	uint IndexCount;
 	uint InstanceCount;
 	uint FirstIndex;

@@ -1,5 +1,12 @@
 #include "intrinsics.h"
 
+struct draw_cull_data
+{
+	glm::vec4 Frustrum[6];
+	u32 LodEnabled;
+	u32 CullEnabled;
+};
+
 VkBool32 DebugReportCallback(VkDebugReportFlagsEXT Flags, VkDebugReportObjectTypeEXT ObjectType, u64 Object, size_t Location, s32 MessageCode, const char* pLayerPrefix, const char* pMessage, void* pUserData)
 {
 	const char* ErrorType = (Flags & VK_DEBUG_REPORT_ERROR_BIT_EXT) ? "Error" :
@@ -83,6 +90,7 @@ CreateDevice(const VkPhysicalDevice& PhysicalDevice, u32* FamilyIndex)
 		"VK_KHR_shader_non_semantic_info",
 		VK_KHR_8BIT_STORAGE_EXTENSION_NAME,
 		VK_KHR_16BIT_STORAGE_EXTENSION_NAME,
+		VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME,
 	};
 	if(IsRtxSupported)
 	{
@@ -101,6 +109,7 @@ CreateDevice(const VkPhysicalDevice& PhysicalDevice, u32* FamilyIndex)
 
 	VkPhysicalDeviceFeatures2 Features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
 	Features.features.multiDrawIndirect = true;
+	Features.features.pipelineStatisticsQuery = true;
 
 	VkPhysicalDevice8BitStorageFeatures Features8 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES};
 	Features8.storageBuffer8BitAccess = true;
@@ -408,6 +417,12 @@ CreateQueryPool(VkDevice Device, VkQueryType Type, uint32_t QueryCount)
 	VkQueryPoolCreateInfo CreateInfo = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
 	CreateInfo.queryType = Type;
 	CreateInfo.queryCount = QueryCount;
+
+	if(Type == VK_QUERY_TYPE_PIPELINE_STATISTICS)
+	{
+		CreateInfo.pipelineStatistics = VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT;
+	}
+
 	VkQueryPool Result = 0;
 	VK_CHECK(vkCreateQueryPool(Device, &CreateInfo, 0, &Result));
 	return Result;
@@ -453,6 +468,11 @@ glm::mat4x4 GetProjection(float FovY, float Aspect, float ZNear)
 	Proj[3][2] = ZNear;
 
 	return Proj;
+}
+
+glm::vec4 NormalizePlane(glm::vec4 P)
+{
+	return P / glm::length(glm::vec3(P));
 }
 
 LRESULT CALLBACK WindowProc(HWND Wnd, UINT Msg, WPARAM wParam, LPARAM lParam);
@@ -585,7 +605,7 @@ WinMain(HINSTANCE CurrInst,
 	CreateSwapchain(Swapchain, RenderPass, Device, Surface, SurfaceFormat, SurfaceCaps, ClientWidth, ClientHeight, &FamilyIndex);
 
 
-	program ComputeProgram = CreateProgram(Device, VK_PIPELINE_BIND_POINT_COMPUTE, {&CommandComputeShader}, 6 * sizeof(glm::vec4));
+	program ComputeProgram = CreateProgram(Device, VK_PIPELINE_BIND_POINT_COMPUTE, {&CommandComputeShader}, sizeof(draw_cull_data));
 	program MeshProgram = CreateProgram(Device, VK_PIPELINE_BIND_POINT_GRAPHICS, {&ObjectVertexShader, &ObjectFragmentShader}, sizeof(globals));
 
 	VkPipelineCache PipelineCache = 0;
@@ -619,8 +639,11 @@ WinMain(HINSTANCE CurrInst,
 	VkCommandBuffer CommandBuffer = 0;
 	vkAllocateCommandBuffers(Device, &CommandBufferAllocateInfo, &CommandBuffer);
 
-	VkQueryPool QueryPool = CreateQueryPool(Device, VK_QUERY_TYPE_TIMESTAMP, 128);
-	assert(QueryPool);
+	VkQueryPool TimestampsQueryPool = CreateQueryPool(Device, VK_QUERY_TYPE_TIMESTAMP, 128);
+	assert(TimestampsQueryPool);
+
+	VkQueryPool PipelineQueryPool = CreateQueryPool(Device, VK_QUERY_TYPE_PIPELINE_STATISTICS, 1);
+	assert(PipelineQueryPool);
 
 	VkPhysicalDeviceMemoryProperties MemoryProperties;
 	vkGetPhysicalDeviceMemoryProperties(PhysicalDevice, &MemoryProperties);
@@ -628,18 +651,24 @@ WinMain(HINSTANCE CurrInst,
 	buffer ScratchBuffer = {};
 	CreateBuffer(ScratchBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
-	buffer VertexBuffer = {}, IndexBuffer = {}, MeshletBuffer = {}, MeshletDataBuffer = {}, DrawBuffer = {}, DrawCommandBuffer = {};
+	buffer VertexBuffer = {}, IndexBuffer = {}, MeshBuffer = {}, MeshletBuffer = {}, MeshletDataBuffer = {}, DrawBuffer = {}, DrawCommandBuffer = {};
 	CreateBuffer(VertexBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 	CopyBuffer(ScratchBuffer, VertexBuffer, Geometries.Vertices.data(), sizeof(vertex) * Geometries.Vertices.size(), Device, CommandPool, CommandBuffer, Queue);
 
 	CreateBuffer(IndexBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 	CopyBuffer(ScratchBuffer, IndexBuffer, Geometries.Indices.data(), sizeof(u32) * Geometries.Indices.size(), Device, CommandPool, CommandBuffer, Queue);
 
+	CreateBuffer(MeshBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	CopyBuffer(ScratchBuffer, MeshBuffer, Geometries.Meshes.data(), sizeof(mesh) * Geometries.Meshes.size(), Device, CommandPool, CommandBuffer, Queue);
+
 	if(IsRtxSupported)
 	{
 		CreateBuffer(MeshletBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 		CopyBuffer(ScratchBuffer, MeshletBuffer, Geometries.Meshlets.data(), sizeof(meshlet) * Geometries.Meshlets.size(), Device, CommandPool, CommandBuffer, Queue);
 	}
+
+	buffer DrawCommandCountBuffer = {};
+	CreateBuffer(DrawCommandCountBuffer, Device, MemoryProperties, 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
 	VkFramebuffer TargetFramebuffer = 0;
 	image ColorTarget = {}, DepthTarget = {};
@@ -650,9 +679,13 @@ WinMain(HINSTANCE CurrInst,
 	srand(512);
 	
 	u64 TriangleCount = 0;
-	u32 DrawCount = 20000;
+	u32 DrawCount = 1000000;
+	DrawCount = (DrawCount + 31) & ~31;
+
 	std::vector<mesh_offset> DrawOffsets(DrawCount);
 
+	float SceneRadius  = 500;
+	float DrawDistance = 100;
 	for(u32 DrawIndex = 0;
 		DrawIndex < DrawCount;
 		++DrawIndex)
@@ -660,24 +693,20 @@ WinMain(HINSTANCE CurrInst,
 		u32 MeshIndex = rand() % Geometries.Meshes.size();
 		const mesh& Mesh = Geometries.Meshes[MeshIndex];
 
-		DrawOffsets[DrawIndex].Pos[0] =  float(rand()) / RAND_MAX * 80 - 20;
-		DrawOffsets[DrawIndex].Pos[1] =  float(rand()) / RAND_MAX * 80 - 20;
-		DrawOffsets[DrawIndex].Pos[2] =  float(rand()) / RAND_MAX * 80 - 20;
+		DrawOffsets[DrawIndex].Pos[0] =  float(rand()) / RAND_MAX * SceneRadius * 2 - SceneRadius;
+		DrawOffsets[DrawIndex].Pos[1] =  float(rand()) / RAND_MAX * SceneRadius * 2 - SceneRadius;
+		DrawOffsets[DrawIndex].Pos[2] =  float(rand()) / RAND_MAX * SceneRadius * 2 - SceneRadius;
 		DrawOffsets[DrawIndex].Scale  = (float(rand()) / RAND_MAX) * 0.5f + 1;
 
-		glm::vec3 Axis{(float(rand()) / RAND_MAX) * 0.5f - 1, (float(rand()) / RAND_MAX) * 0.5f - 1, (float(rand()) / RAND_MAX) * 0.5f - 1};
+		glm::vec3 Axis{(float(rand()) / RAND_MAX) * 2 - 1, (float(rand()) / RAND_MAX) * 2 - 1, (float(rand()) / RAND_MAX) * 2 - 1};
 		float Angle = glm::radians((float(rand()) / RAND_MAX) * 90.0f);
 
 		DrawOffsets[DrawIndex].Orient = glm::rotate(glm::quat(1, 0, 0, 0), Angle, Axis);
-		DrawOffsets[DrawIndex].MeshletCount = u32(Geometries.Meshlets.size());
 
-		DrawOffsets[DrawIndex].VertexOffset  = Mesh.VertexOffset;
-		DrawOffsets[DrawIndex].IndexOffset   = Mesh.IndexOffset;
-		DrawOffsets[DrawIndex].IndexCount    = Mesh.IndexCount;
-		DrawOffsets[DrawIndex].MeshletOffset = Mesh.MeshletOffset;
-		DrawOffsets[DrawIndex].MeshletCount  = Mesh.MeshletCount;
+		DrawOffsets[DrawIndex].VertexOffset = Mesh.VertexOffset;
+		DrawOffsets[DrawIndex].MeshIndex    = MeshIndex;
 
-		TriangleCount += Mesh.IndexCount / 3;
+		//TriangleCount += Mesh.Lods[0].IndexCount / 3;
 	}
 
 	CreateBuffer(DrawBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
@@ -685,11 +714,14 @@ WinMain(HINSTANCE CurrInst,
 
 	CreateBuffer(DrawCommandBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
+	draw_cull_data DrawCullData = {};
 	u32 ImageIndex = 0;
 	while(IsRunning)
 	{
 		DispatchMessages();
 		QueryPerformanceCounter(&BegTime);
+		DrawCullData.CullEnabled = IsCullEnabled;
+		DrawCullData.LodEnabled = IsLodEnabled;
 
 		if(ResizeSwapchain(Swapchain, PhysicalDevice, RenderPass, Device, Surface, SurfaceFormat, SurfaceCaps, &FamilyIndex) || !TargetFramebuffer)
 		{
@@ -714,31 +746,34 @@ WinMain(HINSTANCE CurrInst,
 		CommandBufferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 		vkBeginCommandBuffer(CommandBuffer, &CommandBufferBeginInfo);
 
-		vkCmdResetQueryPool(CommandBuffer, QueryPool, 0, 128);
-		vkCmdWriteTimestamp(CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, QueryPool, 0);
+		vkCmdResetQueryPool(CommandBuffer, TimestampsQueryPool, 0, 128);
+		vkCmdWriteTimestamp(CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, TimestampsQueryPool, 0);
 
-		glm::mat4x4 Projection = GetProjection(3.14159265f / 3.0f, (float)Swapchain.Height / (float)Swapchain.Width, 0.01f);
+		glm::mat4x4 Projection = GetProjection(70.0f, (float)Swapchain.Height / (float)Swapchain.Width, 0.01f);
 		{
 			glm::mat4 ProjectionT = glm::transpose(Projection);
-			glm::vec4 Frustrum[6];
-			Frustrum[0] = ProjectionT[3] + ProjectionT[0];
-			Frustrum[1] = ProjectionT[3] - ProjectionT[0];
-			Frustrum[2] = ProjectionT[3] + ProjectionT[1];
-			Frustrum[3] = ProjectionT[3] - ProjectionT[1];
-			Frustrum[4] = ProjectionT[3] - ProjectionT[2];
-			Frustrum[5] = glm::vec4(0, 0, -1, 100);
+			DrawCullData.Frustrum[0] = NormalizePlane(ProjectionT[3] + ProjectionT[0]);
+			DrawCullData.Frustrum[1] = NormalizePlane(ProjectionT[3] - ProjectionT[0]);
+			DrawCullData.Frustrum[2] = NormalizePlane(ProjectionT[3] + ProjectionT[1]);
+			DrawCullData.Frustrum[3] = NormalizePlane(ProjectionT[3] - ProjectionT[1]);
+			DrawCullData.Frustrum[4] = NormalizePlane(ProjectionT[3] - ProjectionT[2]);
+			DrawCullData.Frustrum[5] = glm::vec4(0, 0, -1, DrawDistance);
+
+			vkCmdFillBuffer(CommandBuffer, DrawCommandCountBuffer.Handle, 0, 4, 0);
+			VkBufferMemoryBarrier ZeroInitBarrier = CreateBufferBarrier(DrawCommandCountBuffer.Handle, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+			vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, 0, 1, &ZeroInitBarrier, 0, 0);
 
 			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, DrawCmdPipeline);
 
-			descriptor_template ComputeDescriptors[] = {{DrawBuffer.Handle}, {DrawCommandBuffer.Handle}};
+			descriptor_template ComputeDescriptors[] = {{DrawBuffer.Handle}, {MeshBuffer.Handle}, {DrawCommandBuffer.Handle}, {DrawCommandCountBuffer.Handle}};
 			vkCmdPushDescriptorSetWithTemplateKHR(CommandBuffer, ComputeProgram.DescriptorTemplate, ComputeProgram.Layout, 0, ComputeDescriptors);
 
-			vkCmdPushConstants(CommandBuffer, ComputeProgram.Layout, ComputeProgram.Stages, 0, 6 * sizeof(glm::vec4), Frustrum);
+			vkCmdPushConstants(CommandBuffer, ComputeProgram.Layout, ComputeProgram.Stages, 0, sizeof(draw_cull_data), &DrawCullData);
 			
 			vkCmdDispatch(CommandBuffer, u32((DrawOffsets.size() + 31) / 32), 1, 1);
 
-			VkBufferMemoryBarrier CmdEndBuffer = CreateBufferBarrier(DrawCommandBuffer.Handle, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
-			vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, 0, 0, 1, &CmdEndBuffer, 0, 0);
+			VkBufferMemoryBarrier CmdEndBufferBarrier = CreateBufferBarrier(DrawCommandBuffer.Handle, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
+			vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, 0, 0, 1, &CmdEndBufferBarrier, 0, 0);
 		}
 
 		std::vector<VkImageMemoryBarrier> ImageBeginRenderBarriers = 
@@ -748,6 +783,9 @@ WinMain(HINSTANCE CurrInst,
 		};
 
 		ImageBarrier(CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT|VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, ImageBeginRenderBarriers);
+
+		vkCmdResetQueryPool(CommandBuffer, PipelineQueryPool, 0, 1);
+		vkCmdBeginQuery(CommandBuffer, PipelineQueryPool, 0, 0);
 
 		VkClearValue ClearColor[2] = {};
 		ClearColor[0].color = {48./255., 25/255., 86/255., 1};
@@ -779,29 +817,33 @@ WinMain(HINSTANCE CurrInst,
 			MeshletBufferInfo.offset = 0;
 			MeshletBufferInfo.range = MeshletBuffer.Size;
 
-			descriptor_template DescriptorInfo[3] = {{DrawBuffer.Handle, 0, DrawBuffer.Size},
-													 {VertexBuffer.Handle, 0, VertexBuffer.Size}, 
-													 {MeshletBuffer.Handle, 0, MeshletBuffer.Size}};
+			descriptor_template DescriptorInfo[] = {{DrawBuffer.Handle, 0, DrawBuffer.Size},
+													{DrawCommandBuffer.Handle, 0, DrawCommandBuffer.Size},
+													{VertexBuffer.Handle, 0, VertexBuffer.Size}, 
+													{MeshletBuffer.Handle, 0, MeshletBuffer.Size}};
 
 			vkCmdPushDescriptorSetWithTemplateKHR(CommandBuffer, RtxProgram.DescriptorTemplate, RtxProgram.Layout, 0, DescriptorInfo);
 
 			vkCmdPushConstants(CommandBuffer, RtxProgram.Layout, RtxProgram.Stages, 0, sizeof(globals), &Globals);
-			vkCmdDrawMeshTasksIndirectNV(CommandBuffer, DrawCommandBuffer.Handle, offsetof(mesh_draw_command, MeshletDrawCommand), DrawCount, sizeof(mesh_draw_command));
+			vkCmdDrawMeshTasksIndirectCountNV(CommandBuffer, DrawCommandBuffer.Handle, offsetof(mesh_draw_command, MeshletDrawCommand), DrawCommandCountBuffer.Handle, 0, DrawCount, sizeof(mesh_draw_command));
 		}
 		else
 		{
 			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, MeshPipeline);
-			descriptor_template DescriptorInfo[2] = {{DrawBuffer.Handle, 0, DrawBuffer.Size},
-													 {VertexBuffer.Handle, 0, VertexBuffer.Size}};
+			descriptor_template DescriptorInfo[] = {{DrawBuffer.Handle, 0, DrawBuffer.Size},
+												    {DrawCommandBuffer.Handle, 0, DrawCommandBuffer.Size},
+													{VertexBuffer.Handle, 0, VertexBuffer.Size}};
 
 			vkCmdPushDescriptorSetWithTemplateKHR(CommandBuffer, MeshProgram.DescriptorTemplate, MeshProgram.Layout, 0, DescriptorInfo);
 			vkCmdBindIndexBuffer(CommandBuffer, IndexBuffer.Handle, 0, VK_INDEX_TYPE_UINT32);
 
 			vkCmdPushConstants(CommandBuffer, MeshProgram.Layout, MeshProgram.Stages, 0, sizeof(globals), &Globals);
-			vkCmdDrawIndexedIndirect(CommandBuffer, DrawCommandBuffer.Handle, offsetof(mesh_draw_command, DrawCommand), DrawCount, sizeof(mesh_draw_command));
+			vkCmdDrawIndexedIndirectCountKHR(CommandBuffer, DrawCommandBuffer.Handle, offsetof(mesh_draw_command, DrawCommand), DrawCommandCountBuffer.Handle, 0, DrawCount, sizeof(mesh_draw_command));
 		}
 
 		vkCmdEndRenderPass(CommandBuffer);
+
+		vkCmdEndQuery(CommandBuffer, PipelineQueryPool, 0);
 
 		std::vector<VkImageMemoryBarrier> ImageCopyBarriers = 
 		{
@@ -819,7 +861,7 @@ WinMain(HINSTANCE CurrInst,
 		ImageCopyRegion.extent = {Swapchain.Width, Swapchain.Height, 1};
 		vkCmdCopyImage(CommandBuffer, ColorTarget.Handle, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, Swapchain.Images[ImageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &ImageCopyRegion);
 
-		vkCmdWriteTimestamp(CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, QueryPool, 1);
+		vkCmdWriteTimestamp(CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, TimestampsQueryPool, 1);
 
 		std::vector<VkImageMemoryBarrier> ImagePresentBarrier = 
 		{
@@ -850,21 +892,28 @@ WinMain(HINSTANCE CurrInst,
 
 		vkDeviceWaitIdle(Device);
 
-		u64 QueryResults[2] = {};
-		vkGetQueryPoolResults(Device, QueryPool, 0, ArraySize(QueryResults), sizeof(QueryResults), QueryResults, sizeof(QueryResults[0]), VK_QUERY_RESULT_64_BIT);
+		u64 TimeResults[2] = {};
+		vkGetQueryPoolResults(Device, TimestampsQueryPool, 0, ArraySize(TimeResults), sizeof(TimeResults), TimeResults, sizeof(TimeResults[0]), VK_QUERY_RESULT_64_BIT);
+
+		u64 PipelineResults[1] = {};
+		vkGetQueryPoolResults(Device, PipelineQueryPool, 0, 1, sizeof(PipelineResults), PipelineResults, sizeof(PipelineResults[0]), 0);
+
+		TriangleCount = PipelineResults[0];
 
 		QueryPerformanceCounter(&EndTime);
 
 		CpuAvgTime = CpuAvgTime * 0.75f + ((float)(EndTime.QuadPart - BegTime.QuadPart) / (float)TimeFreq.QuadPart * 1000.0f) * 0.25f;
-		GpuAvgTime = GpuAvgTime * 0.75f + ((float)(QueryResults[1] - QueryResults[0]) * (float)Props.limits.timestampPeriod * 1.e-6f) * 0.25f;
+		GpuAvgTime = GpuAvgTime * 0.75f + ((float)(TimeResults[1] - TimeResults[0]) * (float)Props.limits.timestampPeriod * 1.e-6f) * 0.25f;
 
 		char Title[256];
-		sprintf(Title, "%s; Vulkan Engine - cpu: %.2f ms, gpu: %.2f ms; %0.2f cpu FPMS; %0.2f gpu FPMS; %llu triangles; %llu meshlets", 
+		sprintf(Title, "%s; %s; %s; Vulkan Engine - cpu: %.2f ms, gpu: %.2f ms; %0.2f cpu FPS; %0.2f gpu FPS; %llu triangles; %llu meshlets", 
 				IsRtxEnabled ? "RTX Is Enabled" : "RTX Is Disabled",
+				IsCullEnabled == 1 ? "Cull Is Enabled" : "Cull Is Disabled",
+				IsLodEnabled == 1 ? "Lod Is Enabled" : "Lod Is Disabled",
 				CpuAvgTime, 
 			    GpuAvgTime,
-				1.0f / (CpuAvgTime),
-				1.0f / (GpuAvgTime),
+				1.0f / (CpuAvgTime) * 1000.0f,
+				1.0f / (GpuAvgTime) * 1000.0f,
 				TriangleCount,
 				Geometries.Meshlets.size());
 		SetWindowTextA(Window, Title);
@@ -880,13 +929,16 @@ WinMain(HINSTANCE CurrInst,
 		DestroyBuffer(MeshletDataBuffer, Device);
 	}
 
+	DestroyBuffer(MeshBuffer, Device);
+	DestroyBuffer(DrawCommandCountBuffer, Device);
 	DestroyBuffer(DrawBuffer, Device);
 	DestroyBuffer(DrawCommandBuffer, Device);
 	DestroyBuffer(VertexBuffer, Device);
 	DestroyBuffer(IndexBuffer, Device);
 	DestroyBuffer(ScratchBuffer, Device);
 
-	vkDestroyQueryPool(Device, QueryPool, 0);
+	vkDestroyQueryPool(Device, TimestampsQueryPool, 0);
+	vkDestroyQueryPool(Device, PipelineQueryPool, 0);
 
 	vkDestroyCommandPool(Device, CommandPool, 0);
 
@@ -974,6 +1026,14 @@ DispatchMessages()
 					if(KeyCode == 'R')
 					{
 						IsRtxEnabled = !IsRtxEnabled;
+					}
+					if(KeyCode == 'L')
+					{
+						IsLodEnabled = !IsLodEnabled;
+					}
+					if(KeyCode == 'C')
+					{
+						IsCullEnabled = !IsCullEnabled;
 					}
 				}
 			} break;
