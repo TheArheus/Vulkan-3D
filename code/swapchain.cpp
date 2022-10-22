@@ -17,7 +17,7 @@ CreateFramebuffer(VkDevice Device, VkRenderPass RenderPass, VkImageView ColorVie
 }
 
 internal VkImageView
-CreateImageView(VkDevice Device, VkImage Image, VkFormat Format)
+CreateImageView(VkDevice Device, VkImage Image, VkFormat Format, u32 MipLevel, u32 LevelCount)
 {
 	VkImageAspectFlags Aspect = (Format == VK_FORMAT_D32_SFLOAT) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
 
@@ -26,8 +26,9 @@ CreateImageView(VkDevice Device, VkImage Image, VkFormat Format)
 	CreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
 	CreateInfo.image = Image;
 	CreateInfo.subresourceRange.aspectMask = Aspect;
+	CreateInfo.subresourceRange.baseMipLevel = MipLevel;
 	CreateInfo.subresourceRange.layerCount = 1;
-	CreateInfo.subresourceRange.levelCount = 1;
+	CreateInfo.subresourceRange.levelCount = LevelCount;
 
 	VkImageView Result = 0;
 	vkCreateImageView(Device, &CreateInfo, 0, &Result);

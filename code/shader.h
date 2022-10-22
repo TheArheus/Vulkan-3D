@@ -3,7 +3,13 @@ struct shader
 {
 	VkShaderModule Handle;
 	VkShaderStageFlagBits Stage;
-	u32 StorageBufferMask;
+
+	VkDescriptorType ResourceTypes[32];
+	u32 ResourceMask;
+
+	u32 LocalSizeX;
+	u32 LocalSizeY;
+	u32 LocalSizeZ;
 	bool IsUsingPushConstant;
 };
 
@@ -42,6 +48,13 @@ struct descriptor_template
 	descriptor_template(VkSampler Sampler, VkImageView ImageView, VkImageLayout ImageLayout)
 	{
 		Image.sampler = Sampler;
+		Image.imageView = ImageView;
+		Image.imageLayout = ImageLayout;
+	}
+
+	descriptor_template(VkImageView ImageView, VkImageLayout ImageLayout)
+	{
+		Image.sampler = VK_NULL_HANDLE;
 		Image.imageView = ImageView;
 		Image.imageLayout = ImageLayout;
 	}

@@ -1,8 +1,10 @@
 
 struct resource
 {
-	bool IsValid;
-	u32  Type;
+	enum resource_type{TypeUnknown = 0, TypeVariable, TypePointer, TypeStruct, TypeImage, TypeSampler, TypeSampledImage, TypeCombinedSampleImage};
+	resource_type ResType;
+
+	u32  TypeId;
 	u32  StorageClass;
 	u32  DescriptorSet;
 	u32  Binding;
@@ -62,6 +64,23 @@ ParseShader(shader& Shader, const u32* Code, u32 CodeSize)
 				assert(WordCount >= 2);
 				Shader.Stage = GetShaderStage((SpvExecutionModel)Instruction[1]);
 			} break;
+			case SpvOpExecutionMode:
+			{
+				assert(WordCount >= 3);
+
+				u32 Mode = Instruction[2];
+
+				switch(Mode)
+				{
+					case SpvExecutionModeLocalSize:
+					{
+						assert(WordCount == 6);
+						Shader.LocalSizeX = Instruction[3];
+						Shader.LocalSizeY = Instruction[4];
+						Shader.LocalSizeZ = Instruction[5];
+					} break;
+				};
+			} break;
 			case SpvOpDecorate:
 			{
 				assert(WordCount >= 3);
@@ -82,14 +101,66 @@ ParseShader(shader& Shader, const u32* Code, u32 CodeSize)
 					} break;
 				}
 			} break;
+			case SpvOpTypePointer:
+			{
+				assert(WordCount == 4);
+
+				u32 Id = Instruction[1];
+				assert(Id < IdBound);
+				assert(Vars[Id].ResType == resource::TypeUnknown);
+
+				Vars[Id].ResType = resource::TypePointer;
+				Vars[Id].TypeId = Instruction[3];
+				Vars[Id].StorageClass = Instruction[2];
+			} break;
+			case SpvOpTypeStruct:
+			{
+				assert(WordCount >= 2);
+
+				u32 Id = Instruction[1];
+				assert(Id < IdBound);
+				assert(Vars[Id].ResType == resource::TypeUnknown);
+
+				Vars[Id].ResType = resource::TypeStruct;
+			} break;
+			case SpvOpTypeImage:
+			{
+				assert(WordCount >= 2);
+
+				u32 Id = Instruction[1];
+				assert(Id < IdBound);
+				assert(Vars[Id].ResType == resource::TypeUnknown);
+
+				Vars[Id].ResType = resource::TypeImage;
+			} break;
+			case SpvOpTypeSampler:
+			{
+				assert(WordCount >= 2);
+
+				u32 Id = Instruction[1];
+				assert(Id < IdBound);
+				assert(Vars[Id].ResType == resource::TypeUnknown);
+
+				Vars[Id].ResType = resource::TypeSampler;
+			} break;
+			case SpvOpTypeSampledImage:
+			{
+				assert(WordCount >= 2);
+
+				u32 Id = Instruction[1];
+				assert(Id < IdBound);
+				assert(Vars[Id].ResType == resource::TypeUnknown);
+
+				Vars[Id].ResType = resource::TypeSampledImage;
+			} break;
 			case SpvOpVariable:
 			{
 				u32 Id = Instruction[2];
-				u32 Type = Instruction[1];
+				u32 TypeId = Instruction[1];
 				u32 StorageClass = Instruction[3];
 
-				Vars[Id].IsValid = true;
-				Vars[Id].Type = Type;
+				Vars[Id].ResType = resource::TypeVariable;
+				Vars[Id].TypeId = TypeId;
 				Vars[Id].StorageClass = StorageClass;
 			} break;
 		}
@@ -100,14 +171,46 @@ ParseShader(shader& Shader, const u32* Code, u32 CodeSize)
 
 	for(auto Var : Vars)
 	{
-		if(Var.IsValid && (Var.StorageClass == SpvStorageClassStorageBuffer || Var.StorageClass == SpvStorageClassUniformConstant))
+		//if(Var.ResType && (Var.StorageClass == SpvStorageClassUniform || Var.StorageClass == SpvStorageClassUniformConstant))
+		if((Var.ResType == resource::TypeVariable) && (Var.StorageClass == SpvStorageClassStorageBuffer || Var.StorageClass == SpvStorageClassUniformConstant))
 		{
 			assert(Var.DescriptorSet == 0);
 			assert(Var.Binding < 32);
-			Shader.StorageBufferMask |= 1 << Var.Binding;
+			assert(Vars[Var.TypeId].ResType == resource::TypePointer);
+
+			u32 DerefResType = Vars[Vars[Var.TypeId].TypeId].ResType;
+			switch(DerefResType)
+			{
+				case resource::TypeStruct:
+				{
+					Shader.ResourceTypes[Var.Binding] = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+				}break;
+
+				case resource::TypeImage: 
+				{
+					Shader.ResourceTypes[Var.Binding] = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+				}break;
+
+				case resource::TypeSampler:
+				{
+					Shader.ResourceTypes[Var.Binding] = VK_DESCRIPTOR_TYPE_SAMPLER;
+				}break;
+
+				case resource::TypeSampledImage:
+				{
+					Shader.ResourceTypes[Var.Binding] = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+				}break;
+
+				default:
+				{
+					assert("Unknown Resource Type");
+				} break;
+			}
+
+			Shader.ResourceMask |= 1 << Var.Binding;
 		}
 
-		if(Var.IsValid && (Var.StorageClass == SpvStorageClassPushConstant))
+		if((Var.ResType == resource::TypeVariable) && (Var.StorageClass == SpvStorageClassPushConstant))
 		{
 			Shader.IsUsingPushConstant = true;
 		}
@@ -147,6 +250,34 @@ LoadShader(shader& Shader, VkDevice Device, const char* Path)
 	return Result;
 }
 
+internal u32
+GatherResourceTypes(shaders Shaders, VkDescriptorType (&ResourceTypes)[32])
+{
+	u32 Mask = 0;
+	for(const shader* Shader : Shaders)
+	{
+		for(u32 BitIndex = 0;
+			BitIndex < 32;
+			++BitIndex)
+		{
+			if(Shader->ResourceMask & (1 << BitIndex))
+			{
+				if(Mask & (1 << BitIndex))
+				{
+					assert(ResourceTypes[BitIndex] == Shader->ResourceTypes[BitIndex]);
+				}
+				else
+				{
+					ResourceTypes[BitIndex] = Shader->ResourceTypes[BitIndex];
+					Mask |= (1 << BitIndex);
+				}
+			}
+		}
+	}
+
+	return Mask;
+}
+
 internal VkDescriptorSetLayout
 CreateDescriptorSetLayout(VkDevice Device, shaders Shaders)
 {
@@ -154,27 +285,24 @@ CreateDescriptorSetLayout(VkDevice Device, shaders Shaders)
 
 	std::vector<VkDescriptorSetLayoutBinding> SetBindings;
 
-	u32 StorageBufferMask = 0;
-	for(const shader* Shader : Shaders)
-	{
-		StorageBufferMask |= Shader->StorageBufferMask;
-	}
+	VkDescriptorType ResourceTypes[32] = {};
+	u32 ResourceMask = GatherResourceTypes(Shaders, ResourceTypes);
 
 	for(u32 BitIndex = 0;
 		BitIndex < 32;
 		++BitIndex)
 	{
-		if(StorageBufferMask & (1 << BitIndex))
+		if(ResourceMask & (1 << BitIndex))
 		{
 			VkDescriptorSetLayoutBinding NewBinding = {};
 			NewBinding.binding = BitIndex;
 			NewBinding.descriptorCount = 1;
-			NewBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			NewBinding.descriptorType = ResourceTypes[BitIndex];
 			NewBinding.stageFlags = 0;
 
 			for(const shader* Shader : Shaders)
 			{
-				if(Shader->StorageBufferMask & (1 << BitIndex))
+				if(Shader->ResourceMask & (1 << BitIndex))
 				{
 					NewBinding.stageFlags |= Shader->Stage;
 				}
@@ -222,24 +350,21 @@ CreateDescriptorTemplate(VkDevice Device, VkPipelineBindPoint BindPoint, VkPipel
 	VkDescriptorUpdateTemplate Result = 0;
 	std::vector<VkDescriptorUpdateTemplateEntry> Entries;
 
-	u32 StorageBufferMask = 0;
-	for(const shader* Shader : Shaders)
-	{
-		StorageBufferMask |= Shader->StorageBufferMask;
-	}
+	VkDescriptorType ResourceTypes[32] = {};
+	u32 ResourceMask = GatherResourceTypes(Shaders, ResourceTypes);
 
 	for(u32 BitIndex = 0;
 		BitIndex < 32;
 		++BitIndex)
 	{
-		if(StorageBufferMask & (1 << BitIndex))
+		if(ResourceMask & (1 << BitIndex))
 		{
 			VkDescriptorUpdateTemplateEntry DescriptorSet = {};
 
 			DescriptorSet.dstBinding = BitIndex;
 			DescriptorSet.dstArrayElement = 0;
 			DescriptorSet.descriptorCount = 1;
-			DescriptorSet.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			DescriptorSet.descriptorType = ResourceTypes[BitIndex];
 			DescriptorSet.offset = sizeof(descriptor_template) * BitIndex;
 			DescriptorSet.stride = sizeof(descriptor_template);
 

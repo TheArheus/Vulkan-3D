@@ -1,6 +1,5 @@
 
 #include "mesh_headers.hlsl"
-#define UseWave 1
 
 struct draw_cull_data
 {
@@ -21,14 +20,12 @@ struct draw_count
 [[vk::push_constant]] draw_cull_data DrawCullData;
 
 
-[numthreads(32, 1, 1)]
-void main(uint3 WorkGroupID : SV_GroupID, uint3 LocalInvocation : SV_GroupThreadID, uint ThreadIndex : SV_GroupIndex)
+[numthreads(64, 1, 1)]
+void main(uint3 GlobalInvocationID : SV_DispatchThreadID)
 {
-	uint ti = LocalInvocation.x;
-	uint gi = WorkGroupID.x;
-	uint di = gi * 32 + ti;
+	uint di = GlobalInvocationID.x;
 
-	mesh Mesh = MeshDataBuffer[MeshOffsetBuffer[di].MeshIndex];
+	uint MeshIndex = MeshOffsetBuffer[di].MeshIndex;
 
 	float3 Center = MeshOffsetBuffer[di].Center * MeshOffsetBuffer[di].Scale + MeshOffsetBuffer[di].Pos;
 	float Radius = MeshOffsetBuffer[di].Radius * MeshOffsetBuffer[di].Scale;
@@ -43,44 +40,23 @@ void main(uint3 WorkGroupID : SV_GroupID, uint3 LocalInvocation : SV_GroupThread
 
 	IsVisible = (DrawCullData.CullEnabled == 1) ? IsVisible : true;
 
-#if UseWave
-	uint VisibleCount = WaveActiveCountBits(IsVisible);
-
-	if(VisibleCount == 0)
-	{
-		return;
-	}
-
-	uint DrawCommandGroupIndex = 0;
-	
-	if(ti == 0)
-	{
-		InterlockedAdd(DrawCount[0].Data, VisibleCount, DrawCommandGroupIndex);
-	}
-
-	uint Index = WavePrefixSum(IsVisible);
-	uint DrawCommandIndex = WaveReadLaneFirst(DrawCommandGroupIndex) + Index;
-
-#endif
-
 	if(IsVisible)
 	{
-#if !UseWave
 		uint DrawCommandIndex;
 		InterlockedAdd(DrawCount[0].Data, 1, DrawCommandIndex);
-#endif
+
 		float LodDistance = log2(max(1, distance(Center, float3(0, 0, 0)) - Radius));
-		uint LodIndex = clamp(int(LodDistance), 0, Mesh.LodCount - 1);
+		uint LodIndex = clamp(int(LodDistance), 0, MeshDataBuffer[MeshIndex].LodCount - 1);
 
 		LodIndex = (DrawCullData.LodEnabled == 1) ? LodIndex : 0;
 
-		mesh_lod Lod = Mesh.Lods[LodIndex];
+		mesh_lod Lod = MeshDataBuffer[MeshIndex].Lods[LodIndex];
 
 		DrawCommands[DrawCommandIndex].DrawIndex = di;
 		DrawCommands[DrawCommandIndex].IndexCount = Lod.IndexCount;
 		DrawCommands[DrawCommandIndex].InstanceCount = 1;
 		DrawCommands[DrawCommandIndex].FirstIndex = Lod.IndexOffset;
-		DrawCommands[DrawCommandIndex].VertexOffset = Mesh.VertexOffset;
+		DrawCommands[DrawCommandIndex].VertexOffset = MeshDataBuffer[MeshIndex].VertexOffset;
 		DrawCommands[DrawCommandIndex].FirstInstance = 0;
 
 		DrawCommands[DrawCommandIndex].TaskCount = (Lod.MeshletCount + 31) / 32;
