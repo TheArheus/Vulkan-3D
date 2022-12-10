@@ -410,11 +410,15 @@ CreateGraphicsPipeline(VkDevice Device, VkPipelineCache PipelineCache, VkPipelin
 	VkPipelineVertexInputStateCreateInfo VertexInputState = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
 
 	VkPipelineInputAssemblyStateCreateInfo InputAssemblyState = {VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-	InputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+	InputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+
+	VkPipelineColorBlendAttachmentState ColorAttachmentState = {};
+	//ColorAttachmentState.blendEnable = true;
+	//ColorAttachmentState.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+	//ColorAttachmentState.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+	ColorAttachmentState.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
 
 	VkPipelineColorBlendStateCreateInfo ColorBlendState = {VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-	VkPipelineColorBlendAttachmentState ColorAttachmentState = {};
-	ColorAttachmentState.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
 	ColorBlendState.pAttachments = &ColorAttachmentState;
 	ColorBlendState.attachmentCount = 1;
 

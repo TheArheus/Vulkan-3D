@@ -5,6 +5,10 @@ struct alignas(16) draw_cull_data
 	glm::vec4 Frustrum[6];
 	u32 LodEnabled;
 	u32 CullEnabled;
+	u32 OcclusionEnabled;
+
+	float P00, P11, znear;
+	float PyramidWidth, PyramidHeight;
 };
 
 struct alignas(16) depth_reduce_data
@@ -96,7 +100,9 @@ CreateDevice(const VkPhysicalDevice& PhysicalDevice, u32* FamilyIndex)
 		VK_KHR_8BIT_STORAGE_EXTENSION_NAME,
 		VK_KHR_16BIT_STORAGE_EXTENSION_NAME,
 		VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME,
+		VK_EXT_SAMPLER_FILTER_MINMAX_EXTENSION_NAME,
 	};
+
 	if(IsRtxSupported)
 	{
 		Extensions.push_back(VK_NV_MESH_SHADER_EXTENSION_NAME);
@@ -418,17 +424,24 @@ DestroyImage(image& Image, VkDevice& Device)
 	vkDestroyImage(Device, Image.Handle, 0);
 }
 
-VkSampler CreateSampler(VkDevice Device)
+VkSampler CreateSampler(VkDevice Device, VkSamplerReductionModeEXT Reduction)
 {
 	VkSamplerCreateInfo CreateInfo = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
 	CreateInfo.minLod = 0;
 	CreateInfo.maxLod = 16;
-	CreateInfo.magFilter = VK_FILTER_NEAREST;
-	CreateInfo.minFilter = VK_FILTER_NEAREST;
+	CreateInfo.magFilter = VK_FILTER_LINEAR;
+	CreateInfo.minFilter = VK_FILTER_LINEAR;
 	CreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-	CreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-	CreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-	CreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+	CreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	CreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	CreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+
+	VkSamplerReductionModeCreateInfoEXT ReductionCreateInfo = {VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO_EXT};
+	if(Reduction != VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE_EXT)
+	{
+		ReductionCreateInfo.reductionMode = Reduction;
+		CreateInfo.pNext = &ReductionCreateInfo;
+	}
 
 	VkSampler Result = 0;
 	vkCreateSampler(Device, &CreateInfo, 0, &Result);
@@ -501,9 +514,9 @@ glm::vec4 NormalizePlane(glm::vec4 P)
 
 u32 GetImageMipLevels(u32 Width, u32 Height)
 {
-	u32 Result = 0;
+	u32 Result = 1;
 
-	while(Width > 1 && Height > 1)
+	while(Width > 1 || Height > 1)
 	{
 		Result++;
 		Width  /= 2;
@@ -518,13 +531,53 @@ u32 GetGroupCount(u32 ThreadCount, u32 LocalSize)
 	return (ThreadCount + LocalSize - 1) / LocalSize;
 }
 
+u32 GetPreviousPowerOfTwo(u32 Val)
+{
+	if(Val == 0) return 0;
+
+	Val--;
+	Val |= (Val >> 1);
+	Val |= (Val >> 2);
+	Val |= (Val >> 4);
+	Val |= (Val >> 8);
+	Val |= (Val >> 16);
+
+	Val = Val - (Val >> 1);
+
+	return Val;
+}
+
+glm::vec4 
+GetAxisAlignedBoundingBox(const glm::vec3& C, // camera-space sphere center
+						  float r, // sphere radius
+						  float NearZ, // near clipping plane position (negative)
+						  float P00,
+						  float P11)
+{
+	if(C.z < r + NearZ)
+		return glm::vec4(); // TODO: return boolean
+
+	glm::vec2 cx(-C.x, -C.z);
+	glm::vec2 vx = glm::vec2(sqrt(dot(cx, cx) - r * r), r) / length(cx);
+	glm::vec2 minx = glm::mat2(vx.x, vx.y, -vx.y, vx.x) * cx;
+	glm::vec2 maxx = glm::mat2(vx.x, -vx.y, vx.y, vx.x) * cx;
+
+	glm::vec2 cy(-C.y, -C.z);
+	glm::vec2 vy = glm::vec2(sqrt(dot(cy, cy) - r * r), r) / length(cy);
+	glm::vec2 miny = glm::mat2(vy.x, -vy.y, vy.y, vy.x) * cy;
+	glm::vec2 maxy = glm::mat2(vy.x, vy.y, -vy.y, vy.x) * cy;
+
+	return glm::vec4(minx.x / minx.y * P00, miny.x / miny.y * P11, maxx.x / maxx.y * P00, maxy.x / maxy.y * P11) * 
+		   glm::vec4(0.5f, -0.5f, 0.5f, -0.5f) + glm::vec4(0.5f);
+}
+
 LRESULT CALLBACK WindowProc(HWND Wnd, UINT Msg, WPARAM wParam, LPARAM lParam);
 
 int WINAPI 
 WinMain(HINSTANCE CurrInst, 
-		 HINSTANCE PrevInst, 
-		 PSTR Cmd, 
-		 int CmdShow) 
+		HINSTANCE PrevInst, 
+		PSTR Cmd, 
+		int CmdShow) 
 {
 	LARGE_INTEGER TimeFreq = {};
 	QueryPerformanceFrequency(&TimeFreq);
@@ -630,17 +683,21 @@ WinMain(HINSTANCE CurrInst,
 
 	shader ObjectMeshShader = {};
 	shader ObjectTaskShader = {};
+
 	if(IsRtxSupported)
 	{
 		LoadShader(ObjectMeshShader, Device, "..\\shaders\\object.mesh.spv");
 		LoadShader(ObjectTaskShader, Device, "..\\shaders\\object.task.spv");
 	}
+
 	shader ObjectVertexShader = {};
 	LoadShader(ObjectVertexShader, Device, "..\\shaders\\object.vert.spv");
 	shader ObjectFragmentShader = {};
 	LoadShader(ObjectFragmentShader, Device, "..\\shaders\\object.frag.spv");
-	shader CommandComputeShader = {};
-	LoadShader(CommandComputeShader, Device, "..\\shaders\\cmd.comp.spv");
+	shader DrawCullCommandComputeShader = {};
+	LoadShader(DrawCullCommandComputeShader, Device, "..\\shaders\\draw_cull.comp.spv");
+	shader DrawCullateCommandComputeShader = {};
+	LoadShader(DrawCullateCommandComputeShader, Device, "..\\shaders\\draw_cullate.comp.spv");
 	shader DepthReduceComputeShader = {};
 	LoadShader(DepthReduceComputeShader, Device, "..\\shaders\\depth_reduce.comp.spv");
 
@@ -651,13 +708,16 @@ WinMain(HINSTANCE CurrInst,
 	swapchain Swapchain;
 	CreateSwapchain(Swapchain, RenderPass, Device, Surface, SurfaceFormat, SurfaceCaps, ClientWidth, ClientHeight, &FamilyIndex);
 
-	program ComputeProgram = CreateProgram(Device, VK_PIPELINE_BIND_POINT_COMPUTE, {&CommandComputeShader}, sizeof(draw_cull_data));
+	program DrawCullComputeProgram = CreateProgram(Device, VK_PIPELINE_BIND_POINT_COMPUTE, {&DrawCullCommandComputeShader}, sizeof(draw_cull_data));
+	program DrawCullateComputeProgram = CreateProgram(Device, VK_PIPELINE_BIND_POINT_COMPUTE, {&DrawCullateCommandComputeShader}, sizeof(draw_cull_data));
 	program DepthReduceProgram = CreateProgram(Device, VK_PIPELINE_BIND_POINT_COMPUTE, {&DepthReduceComputeShader}, sizeof(depth_reduce_data));
 	program MeshProgram = CreateProgram(Device, VK_PIPELINE_BIND_POINT_GRAPHICS, {&ObjectVertexShader, &ObjectFragmentShader}, sizeof(globals));
 
 	VkPipelineCache PipelineCache = 0;
-	VkPipeline DrawCmdPipeline = CreateComputePipeline(Device, PipelineCache, ComputeProgram.Layout, CommandComputeShader);
-	assert(DrawCmdPipeline);
+	VkPipeline DrawCullCmdPipeline = CreateComputePipeline(Device, PipelineCache, DrawCullComputeProgram.Layout, DrawCullCommandComputeShader);
+	assert(DrawCullCmdPipeline);
+	VkPipeline DrawCullateCmdPipeline = CreateComputePipeline(Device, PipelineCache, DrawCullateComputeProgram.Layout, DrawCullateCommandComputeShader);
+	assert(DrawCullateCmdPipeline);
 	VkPipeline DepthReducePipeline = CreateComputePipeline(Device, PipelineCache, DepthReduceProgram.Layout, DepthReduceComputeShader);
 	assert(DepthReducePipeline);
 
@@ -700,7 +760,8 @@ WinMain(HINSTANCE CurrInst,
 	buffer ScratchBuffer = {};
 	CreateBuffer(ScratchBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
-	buffer VertexBuffer = {}, IndexBuffer = {}, MeshBuffer = {}, MeshletBuffer = {}, MeshletDataBuffer = {}, DrawBuffer = {}, DrawCommandBuffer = {};
+	buffer VertexBuffer = {}, IndexBuffer = {}, MeshBuffer = {}, MeshletBuffer = {}, MeshletDataBuffer = {}, DrawBuffer = {}, DrawVisibilityBuffer = {}, DrawCommandBuffer = {};
+
 	CreateBuffer(VertexBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 	CopyBuffer(ScratchBuffer, VertexBuffer, Geometries.Vertices.data(), sizeof(vertex) * Geometries.Vertices.size(), Device, CommandPool, CommandBuffer, Queue);
 
@@ -716,11 +777,14 @@ WinMain(HINSTANCE CurrInst,
 		CopyBuffer(ScratchBuffer, MeshletBuffer, Geometries.Meshlets.data(), sizeof(meshlet) * Geometries.Meshlets.size(), Device, CommandPool, CommandBuffer, Queue);
 	}
 
-	VkSampler DepthSampler = CreateSampler(Device);
+	VkSampler DepthSampler = CreateSampler(Device, VK_SAMPLER_REDUCTION_MODE_MIN_EXT);
 	assert(DepthSampler);
 
 	buffer DrawCommandCountBuffer = {};
 	CreateBuffer(DrawCommandCountBuffer, Device, MemoryProperties, 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+	CreateBuffer(DrawVisibilityBuffer, Device, MemoryProperties, 128 * 1024 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	bool IsVisibilityBufferCleared = false;
 
 	VkFramebuffer TargetFramebuffer = 0;
 	image ColorTarget = {}, DepthTarget = {}, DepthPyramid = {};
@@ -731,13 +795,13 @@ WinMain(HINSTANCE CurrInst,
 	srand(512);
 	
 	u64 TriangleCount = 0;
-	u32 DrawCount = 1000000;
+	u32 DrawCount = 1;
 	DrawCount = (DrawCount + 31) & ~31;
 
 	std::vector<mesh_offset> DrawOffsets(DrawCount);
 
-	float SceneRadius  = 500;
-	float DrawDistance = 100;
+	float SceneRadius  = 5;
+	float DrawDistance = 5;
 	for(u32 DrawIndex = 0;
 		DrawIndex < DrawCount;
 		++DrawIndex)
@@ -748,7 +812,8 @@ WinMain(HINSTANCE CurrInst,
 		DrawOffsets[DrawIndex].Pos[0] =  float(rand()) / RAND_MAX * SceneRadius * 2 - SceneRadius;
 		DrawOffsets[DrawIndex].Pos[1] =  float(rand()) / RAND_MAX * SceneRadius * 2 - SceneRadius;
 		DrawOffsets[DrawIndex].Pos[2] =  float(rand()) / RAND_MAX * SceneRadius * 2 - SceneRadius;
-		DrawOffsets[DrawIndex].Scale  = (float(rand()) / RAND_MAX) * 10;
+		DrawOffsets[DrawIndex].Scale  = (float(rand()) / RAND_MAX) + 1;
+		DrawOffsets[DrawIndex].Scale *= 2.0f;
 
 		glm::vec3 Axis{(float(rand()) / RAND_MAX) * 2 - 1, (float(rand()) / RAND_MAX) * 2 - 1, (float(rand()) / RAND_MAX) * 2 - 1};
 		float Angle = glm::radians((float(rand()) / RAND_MAX) * 90.0f);
@@ -767,6 +832,9 @@ WinMain(HINSTANCE CurrInst,
 	VkImageView DepthPyramidMips[16] = {};
 	u32 DepthPyramidLevels = 0;
 
+	float ZNear = 1.f;
+	u32 DepthPyramidWidth  = 0;
+	u32 DepthPyramidHeight = 0;
 	draw_cull_data DrawCullData = {};
 	u32 ImageIndex = 0;
 	while(IsRunning)
@@ -775,6 +843,7 @@ WinMain(HINSTANCE CurrInst,
 		QueryPerformanceCounter(&BegTime);
 		DrawCullData.CullEnabled = IsCullEnabled;
 		DrawCullData.LodEnabled = IsLodEnabled;
+		DrawCullData.OcclusionEnabled = IsOcclusionEnabled;
 
 		if(ResizeSwapchain(Swapchain, PhysicalDevice, RenderPass, Device, Surface, SurfaceFormat, SurfaceCaps, &FamilyIndex) || !TargetFramebuffer)
 		{
@@ -798,10 +867,12 @@ WinMain(HINSTANCE CurrInst,
 			CreateImage(ColorTarget, Device, MemoryProperties, Swapchain.Width, Swapchain.Height, SurfaceFormat.format, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
 			CreateImage(DepthTarget, Device, MemoryProperties, Swapchain.Width, Swapchain.Height, VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
 
-			DepthPyramidLevels = GetImageMipLevels(Swapchain.Width / 2, Swapchain.Height / 2);
+			DepthPyramidWidth  = GetPreviousPowerOfTwo(Swapchain.Width);
+			DepthPyramidHeight = GetPreviousPowerOfTwo(Swapchain.Height);
+			DepthPyramidLevels = GetImageMipLevels(DepthPyramidWidth, DepthPyramidHeight);
 			GlobalDepthPyramidLevels = DepthPyramidLevels;
 
-			CreateImage(DepthPyramid, Device, MemoryProperties, Swapchain.Width / 2, Swapchain.Height / 2, VK_FORMAT_R32_SFLOAT, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, DepthPyramidLevels);
+			CreateImage(DepthPyramid, Device, MemoryProperties, DepthPyramidWidth, DepthPyramidHeight, VK_FORMAT_R32_SFLOAT, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, DepthPyramidLevels);
 
 			for(u32 DepthPyramidIdx = 0;
 				DepthPyramidIdx < DepthPyramidLevels;
@@ -825,31 +896,58 @@ WinMain(HINSTANCE CurrInst,
 		vkCmdResetQueryPool(CommandBuffer, TimestampsQueryPool, 0, 128);
 		vkCmdWriteTimestamp(CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, TimestampsQueryPool, 0);
 
-		glm::mat4x4 Projection = GetProjection(70.0f, (float)Swapchain.Height / (float)Swapchain.Width, 1.f);
+		if(!IsVisibilityBufferCleared)
 		{
-			glm::mat4 ProjectionT = glm::transpose(Projection);
-			DrawCullData.Frustrum[0] = NormalizePlane(ProjectionT[3] + ProjectionT[0]);
-			DrawCullData.Frustrum[1] = NormalizePlane(ProjectionT[3] - ProjectionT[0]);
-			DrawCullData.Frustrum[2] = NormalizePlane(ProjectionT[3] + ProjectionT[1]);
-			DrawCullData.Frustrum[3] = NormalizePlane(ProjectionT[3] - ProjectionT[1]);
-			DrawCullData.Frustrum[4] = NormalizePlane(ProjectionT[3] - ProjectionT[2]);
-			DrawCullData.Frustrum[5] = glm::vec4(0, 0, -1, DrawDistance);
+			vkCmdFillBuffer(CommandBuffer, DrawVisibilityBuffer.Handle, 0, 4 * DrawCount, 1);
+
+			VkBufferMemoryBarrier ZeroInitBarrier = CreateBufferBarrier(DrawVisibilityBuffer.Handle, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+			vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, 0, 1, &ZeroInitBarrier, 0, 0);
+			IsVisibilityBufferCleared = true;
+		}
+
+		glm::mat4x4 Projection = GetProjection(70.0f, (float)Swapchain.Height / (float)Swapchain.Width, ZNear);
+
+		glm::mat4 ProjectionT = glm::transpose(Projection);
+		DrawCullData.Frustrum[0] = NormalizePlane(ProjectionT[3] + ProjectionT[0]);
+		DrawCullData.Frustrum[1] = NormalizePlane(ProjectionT[3] - ProjectionT[0]);
+		DrawCullData.Frustrum[2] = NormalizePlane(ProjectionT[3] + ProjectionT[1]);
+		DrawCullData.Frustrum[3] = NormalizePlane(ProjectionT[3] - ProjectionT[1]);
+		DrawCullData.Frustrum[4] = NormalizePlane(ProjectionT[3] - ProjectionT[2]);
+		DrawCullData.Frustrum[5] = glm::vec4(0, 0, -1, DrawDistance);
+		DrawCullData.P00 = Projection[0][0];
+		DrawCullData.P11 = Projection[1][1];
+		DrawCullData.znear = ZNear;
+		DrawCullData.PyramidWidth  = float(DepthPyramidWidth);
+		DrawCullData.PyramidHeight = float(DepthPyramidHeight);
+
+		globals Globals = {};
+		Globals.Projection = Projection;
+
+		// NOTE: this is early culling test. Frustrum culling and fill objects that were visible last frame
+		{
+			VkBufferMemoryBarrier ZeroInitBarrier = CreateBufferBarrier(DrawCommandCountBuffer.Handle, VK_ACCESS_INDIRECT_COMMAND_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+			vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, 0, 1, &ZeroInitBarrier, 0, 0);
 
 			vkCmdFillBuffer(CommandBuffer, DrawCommandCountBuffer.Handle, 0, 4, 0);
-			VkBufferMemoryBarrier ZeroInitBarrier = CreateBufferBarrier(DrawCommandCountBuffer.Handle, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+
+			ZeroInitBarrier = CreateBufferBarrier(DrawCommandCountBuffer.Handle, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 			vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, 0, 1, &ZeroInitBarrier, 0, 0);
 
-			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, DrawCmdPipeline);
+			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, DrawCullCmdPipeline);
 
-			descriptor_template ComputeDescriptors[] = {{DrawBuffer.Handle}, {MeshBuffer.Handle}, {DrawCommandBuffer.Handle}, {DrawCommandCountBuffer.Handle}};
-			vkCmdPushDescriptorSetWithTemplateKHR(CommandBuffer, ComputeProgram.DescriptorTemplate, ComputeProgram.Layout, 0, ComputeDescriptors);
+			descriptor_template ComputeDescriptors[] = {{DrawBuffer.Handle}, {MeshBuffer.Handle}, {DrawCommandBuffer.Handle}, {DrawCommandCountBuffer.Handle}, {DrawVisibilityBuffer.Handle}};
+			vkCmdPushDescriptorSetWithTemplateKHR(CommandBuffer, DrawCullComputeProgram.DescriptorTemplate, DrawCullComputeProgram.Layout, 0, ComputeDescriptors);
 
-			vkCmdPushConstants(CommandBuffer, ComputeProgram.Layout, ComputeProgram.Stages, 0, sizeof(draw_cull_data), &DrawCullData);
+			vkCmdPushConstants(CommandBuffer, DrawCullComputeProgram.Layout, DrawCullComputeProgram.Stages, 0, sizeof(draw_cull_data), &DrawCullData);
 			
-			vkCmdDispatch(CommandBuffer, GetGroupCount(DrawOffsets.size(), CommandComputeShader.LocalSizeX), 1, 1);
+			vkCmdDispatch(CommandBuffer, GetGroupCount(DrawOffsets.size(), DrawCullCommandComputeShader.LocalSizeX), 1, 1);
 
-			VkBufferMemoryBarrier CmdEndBufferBarrier = CreateBufferBarrier(DrawCommandBuffer.Handle, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
-			vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, 0, 0, 1, &CmdEndBufferBarrier, 0, 0);
+			VkBufferMemoryBarrier CmdEndBufferBarrier[] = 
+			{
+				CreateBufferBarrier(DrawCommandBuffer.Handle, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT),
+				CreateBufferBarrier(DrawCommandCountBuffer.Handle, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT)
+			};
+			vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, 0, 0, 2, CmdEndBufferBarrier, 0, 0);
 		}
 
 		std::vector<VkImageMemoryBarrier> ImageBeginRenderBarriers = 
@@ -872,92 +970,121 @@ WinMain(HINSTANCE CurrInst,
 		ClearColor[0].color = {48./255., 25/255., 86/255., 1};
 		ClearColor[1].depthStencil = {0, 0};
 
-		VkRenderPassBeginInfo RenderPassBeginInfo = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-		RenderPassBeginInfo.framebuffer = TargetFramebuffer;
-		RenderPassBeginInfo.renderPass = RenderPass;
-		RenderPassBeginInfo.renderArea.extent.width = Swapchain.Width;
-		RenderPassBeginInfo.renderArea.extent.height = Swapchain.Height;
-		RenderPassBeginInfo.clearValueCount = 2;
-		RenderPassBeginInfo.pClearValues = ClearColor;
-		vkCmdBeginRenderPass(CommandBuffer, &RenderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
-
-		globals Globals = {};
-		Globals.Projection = Projection;
-
-		if(IsRtxEnabled)
 		{
-			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, RtxPipeline);
+			VkRenderPassBeginInfo RenderPassBeginInfo = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+			RenderPassBeginInfo.framebuffer = TargetFramebuffer;
+			RenderPassBeginInfo.renderPass = RenderPass;
+			RenderPassBeginInfo.renderArea.extent.width = Swapchain.Width;
+			RenderPassBeginInfo.renderArea.extent.height = Swapchain.Height;
+			RenderPassBeginInfo.clearValueCount = 2;
+			RenderPassBeginInfo.pClearValues = ClearColor;
+			vkCmdBeginRenderPass(CommandBuffer, &RenderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-			VkDescriptorBufferInfo MeshletBufferInfo = {};
-			MeshletBufferInfo.buffer = MeshletBuffer.Handle;
-			MeshletBufferInfo.offset = 0;
-			MeshletBufferInfo.range = MeshletBuffer.Size;
-
-			descriptor_template DescriptorInfo[] = {{DrawBuffer.Handle, 0, DrawBuffer.Size},
-													{DrawCommandBuffer.Handle, 0, DrawCommandBuffer.Size},
-													{VertexBuffer.Handle, 0, VertexBuffer.Size}, 
-													{MeshletBuffer.Handle, 0, MeshletBuffer.Size}};
-
-			vkCmdPushDescriptorSetWithTemplateKHR(CommandBuffer, RtxProgram.DescriptorTemplate, RtxProgram.Layout, 0, DescriptorInfo);
-
-			vkCmdPushConstants(CommandBuffer, RtxProgram.Layout, RtxProgram.Stages, 0, sizeof(globals), &Globals);
-			vkCmdDrawMeshTasksIndirectCountNV(CommandBuffer, DrawCommandBuffer.Handle, offsetof(mesh_draw_command, MeshletDrawCommand), DrawCommandCountBuffer.Handle, 0, DrawCount, sizeof(mesh_draw_command));
-		}
-		else
-		{
-			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, MeshPipeline);
-			descriptor_template DescriptorInfo[] = {{DrawBuffer.Handle, 0, DrawBuffer.Size},
-												    {DrawCommandBuffer.Handle, 0, DrawCommandBuffer.Size},
-													{VertexBuffer.Handle, 0, VertexBuffer.Size}};
-
-			vkCmdPushDescriptorSetWithTemplateKHR(CommandBuffer, MeshProgram.DescriptorTemplate, MeshProgram.Layout, 0, DescriptorInfo);
-			vkCmdBindIndexBuffer(CommandBuffer, IndexBuffer.Handle, 0, VK_INDEX_TYPE_UINT32);
-
-			vkCmdPushConstants(CommandBuffer, MeshProgram.Layout, MeshProgram.Stages, 0, sizeof(globals), &Globals);
-			vkCmdDrawIndexedIndirectCountKHR(CommandBuffer, DrawCommandBuffer.Handle, offsetof(mesh_draw_command, DrawCommand), DrawCommandCountBuffer.Handle, 0, DrawCount, sizeof(mesh_draw_command));
-		}
-
-		vkCmdEndRenderPass(CommandBuffer);
-
-		{
-			std::vector<VkImageMemoryBarrier> DepthReadBarriers = 
+			if(IsRtxEnabled)
 			{
-				CreateImageBarrier(DepthTarget.Handle, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT),
-				CreateImageBarrier(DepthPyramid.Handle, 0, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL),
-			};
-			ImageBarrier(CommandBuffer, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, DepthReadBarriers);
+				vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, RtxPipeline);
 
-			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, DepthReducePipeline);
+				VkDescriptorBufferInfo MeshletBufferInfo = {};
+				MeshletBufferInfo.buffer = MeshletBuffer.Handle;
+				MeshletBufferInfo.offset = 0;
+				MeshletBufferInfo.range = MeshletBuffer.Size;
 
-			for(u32 PyramidIndex = 0;
-				PyramidIndex < DepthPyramidLevels;
-				++PyramidIndex)
+				descriptor_template DescriptorInfo[] = {{DrawBuffer.Handle, 0, DrawBuffer.Size},
+														{DrawCommandBuffer.Handle, 0, DrawCommandBuffer.Size},
+														{VertexBuffer.Handle, 0, VertexBuffer.Size}, 
+														{MeshletBuffer.Handle, 0, MeshletBuffer.Size}};
+
+				vkCmdPushDescriptorSetWithTemplateKHR(CommandBuffer, RtxProgram.DescriptorTemplate, RtxProgram.Layout, 0, DescriptorInfo);
+
+				vkCmdPushConstants(CommandBuffer, RtxProgram.Layout, RtxProgram.Stages, 0, sizeof(globals), &Globals);
+				vkCmdDrawMeshTasksIndirectCountNV(CommandBuffer, DrawCommandBuffer.Handle, offsetof(mesh_draw_command, MeshletDrawCommand), DrawCommandCountBuffer.Handle, 0, DrawCount, sizeof(mesh_draw_command));
+			}
+			else
 			{
-				descriptor_template SourceDepth = (PyramidIndex == 0) ? 
-					descriptor_template(DepthSampler, DepthTarget.View, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) : 
-					descriptor_template(DepthSampler, DepthPyramidMips[PyramidIndex - 1], VK_IMAGE_LAYOUT_GENERAL);
-				descriptor_template ComputeDescriptors[] = {SourceDepth, {DepthPyramidMips[PyramidIndex], VK_IMAGE_LAYOUT_GENERAL}};
-				vkCmdPushDescriptorSetWithTemplateKHR(CommandBuffer, DepthReduceProgram.DescriptorTemplate, DepthReduceProgram.Layout, 0, ComputeDescriptors);
+				vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, MeshPipeline);
+				descriptor_template DescriptorInfo[] = {{DrawBuffer.Handle, 0, DrawBuffer.Size},
+														{DrawCommandBuffer.Handle, 0, DrawCommandBuffer.Size},
+														{VertexBuffer.Handle, 0, VertexBuffer.Size}};
 
-				u32 LevelWidth  = max(1u, (Swapchain.Width / 2) >> PyramidIndex);
-				u32 LevelHeight = max(1u, (Swapchain.Height / 2) >> PyramidIndex);
+				vkCmdPushDescriptorSetWithTemplateKHR(CommandBuffer, MeshProgram.DescriptorTemplate, MeshProgram.Layout, 0, DescriptorInfo);
+				vkCmdBindIndexBuffer(CommandBuffer, IndexBuffer.Handle, 0, VK_INDEX_TYPE_UINT32);
 
-				depth_reduce_data DepthReduceData = {};
-				DepthReduceData.Dims = glm::vec2(LevelWidth, LevelHeight);
-
-				vkCmdPushConstants(CommandBuffer, DepthReduceProgram.Layout, DepthReduceProgram.Stages, 0, sizeof(depth_reduce_data), &DepthReduceData);
-				vkCmdDispatch(CommandBuffer, GetGroupCount(LevelWidth, DepthReduceComputeShader.LocalSizeX), GetGroupCount(LevelHeight, DepthReduceComputeShader.LocalSizeY), 1);
-
-				VkImageMemoryBarrier ReduceBarrier = CreateImageBarrier(DepthPyramid.Handle, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
-				vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, 0, 0, 0, 1, &ReduceBarrier);
+				vkCmdPushConstants(CommandBuffer, MeshProgram.Layout, MeshProgram.Stages, 0, sizeof(globals), &Globals);
+				vkCmdDrawIndexedIndirectCountKHR(CommandBuffer, DrawCommandBuffer.Handle, offsetof(mesh_draw_command, DrawCommand), DrawCommandCountBuffer.Handle, 0, DrawCount, sizeof(mesh_draw_command));
 			}
 
-			std::vector<VkImageMemoryBarrier> DepthWriteBarriers = 
-			{
-				CreateImageBarrier(DepthTarget.Handle, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT),
-			};
-			ImageBarrier(CommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, DepthWriteBarriers);
+			vkCmdEndRenderPass(CommandBuffer);
+		}
 
+		std::vector<VkImageMemoryBarrier> DepthReadBarriers = 
+		{
+			CreateImageBarrier(DepthTarget.Handle, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT),
+			CreateImageBarrier(DepthPyramid.Handle, 0, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL),
+		};
+		ImageBarrier(CommandBuffer, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, DepthReadBarriers);
+
+		vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, DepthReducePipeline);
+
+		// NOTE: Depth pyramid generation
+		for(u32 PyramidIndex = 0;
+			PyramidIndex < DepthPyramidLevels;
+			++PyramidIndex)
+		{
+			descriptor_template SourceDepth = (PyramidIndex == 0) ? 
+				descriptor_template(DepthSampler, DepthTarget.View, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) : 
+				descriptor_template(DepthSampler, DepthPyramidMips[PyramidIndex - 1], VK_IMAGE_LAYOUT_GENERAL);
+			descriptor_template ComputeDescriptors[] = {SourceDepth, {DepthPyramidMips[PyramidIndex], VK_IMAGE_LAYOUT_GENERAL}};
+			vkCmdPushDescriptorSetWithTemplateKHR(CommandBuffer, DepthReduceProgram.DescriptorTemplate, DepthReduceProgram.Layout, 0, ComputeDescriptors);
+
+			u32 LevelWidth  = max(1u, (DepthPyramidWidth) >> PyramidIndex);
+			u32 LevelHeight = max(1u, (DepthPyramidHeight) >> PyramidIndex);
+
+			depth_reduce_data DepthReduceData = {};
+			DepthReduceData.Dims = glm::vec2(LevelWidth, LevelHeight);
+
+			vkCmdPushConstants(CommandBuffer, DepthReduceProgram.Layout, DepthReduceProgram.Stages, 0, sizeof(depth_reduce_data), &DepthReduceData);
+			vkCmdDispatch(CommandBuffer, GetGroupCount(LevelWidth, DepthReduceComputeShader.LocalSizeX), GetGroupCount(LevelHeight, DepthReduceComputeShader.LocalSizeY), 1);
+
+			VkImageMemoryBarrier ReduceBarrier = CreateImageBarrier(DepthPyramid.Handle, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+			vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, 0, 0, 0, 1, &ReduceBarrier);
+		}
+
+		std::vector<VkImageMemoryBarrier> DepthWriteBarriers = 
+		{
+			CreateImageBarrier(DepthTarget.Handle, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT),
+		};
+		ImageBarrier(CommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, DepthWriteBarriers);
+
+		// NOTE: late culling. Frustrum + Occlusion culling and fill objects that were not visible last frame
+		{
+			VkBufferMemoryBarrier ZeroInitBarrier = CreateBufferBarrier(DrawCommandCountBuffer.Handle, VK_ACCESS_INDIRECT_COMMAND_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+			vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, 0, 1, &ZeroInitBarrier, 0, 0);
+
+			vkCmdFillBuffer(CommandBuffer, DrawCommandCountBuffer.Handle, 0, 4, 0);
+
+			ZeroInitBarrier = CreateBufferBarrier(DrawCommandCountBuffer.Handle, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+			vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, 0, 1, &ZeroInitBarrier, 0, 0);
+
+			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, DrawCullateCmdPipeline);
+
+			descriptor_template PyramidDesc(DepthSampler, DepthPyramid.View, VK_IMAGE_LAYOUT_GENERAL);
+			descriptor_template ComputeDescriptors[] = {{DrawBuffer.Handle}, {MeshBuffer.Handle}, {DrawCommandBuffer.Handle}, {DrawCommandCountBuffer.Handle}, {DrawVisibilityBuffer.Handle}, PyramidDesc};
+			vkCmdPushDescriptorSetWithTemplateKHR(CommandBuffer, DrawCullateComputeProgram.DescriptorTemplate, DrawCullateComputeProgram.Layout, 0, ComputeDescriptors);
+
+			vkCmdPushConstants(CommandBuffer, DrawCullateComputeProgram.Layout, DrawCullateComputeProgram.Stages, 0, sizeof(draw_cull_data), &DrawCullData);
+			
+			vkCmdDispatch(CommandBuffer, GetGroupCount(DrawOffsets.size(), DrawCullateCommandComputeShader.LocalSizeX), 1, 1);
+
+			VkBufferMemoryBarrier CmdEndBufferBarrier[] = 
+			{
+				CreateBufferBarrier(DrawCommandBuffer.Handle, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT),
+				CreateBufferBarrier(DrawCommandCountBuffer.Handle, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT)
+			};
+			vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, 0, 0, 2, CmdEndBufferBarrier, 0, 0);
+		}
+
+		// NOTE: Late rendering
+		{
 			VkRenderPassBeginInfo LateRenderPassBeginInfo = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
 			LateRenderPassBeginInfo.framebuffer = TargetFramebuffer;
 			LateRenderPassBeginInfo.renderPass = RenderPassLate;
@@ -965,6 +1092,40 @@ WinMain(HINSTANCE CurrInst,
 			LateRenderPassBeginInfo.renderArea.extent.height = Swapchain.Height;
 
 			vkCmdBeginRenderPass(CommandBuffer, &LateRenderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+			if(IsRtxEnabled)
+			{
+				vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, RtxPipeline);
+
+				VkDescriptorBufferInfo MeshletBufferInfo = {};
+				MeshletBufferInfo.buffer = MeshletBuffer.Handle;
+				MeshletBufferInfo.offset = 0;
+				MeshletBufferInfo.range = MeshletBuffer.Size;
+
+				descriptor_template DescriptorInfo[] = {{DrawBuffer.Handle, 0, DrawBuffer.Size},
+														{DrawCommandBuffer.Handle, 0, DrawCommandBuffer.Size},
+														{VertexBuffer.Handle, 0, VertexBuffer.Size}, 
+														{MeshletBuffer.Handle, 0, MeshletBuffer.Size}};
+
+				vkCmdPushDescriptorSetWithTemplateKHR(CommandBuffer, RtxProgram.DescriptorTemplate, RtxProgram.Layout, 0, DescriptorInfo);
+
+				vkCmdPushConstants(CommandBuffer, RtxProgram.Layout, RtxProgram.Stages, 0, sizeof(globals), &Globals);
+				vkCmdDrawMeshTasksIndirectCountNV(CommandBuffer, DrawCommandBuffer.Handle, offsetof(mesh_draw_command, MeshletDrawCommand), DrawCommandCountBuffer.Handle, 0, DrawCount, sizeof(mesh_draw_command));
+			}
+			else
+			{
+				vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, MeshPipeline);
+				descriptor_template DescriptorInfo[] = {{DrawBuffer.Handle, 0, DrawBuffer.Size},
+														{DrawCommandBuffer.Handle, 0, DrawCommandBuffer.Size},
+														{VertexBuffer.Handle, 0, VertexBuffer.Size}};
+
+				vkCmdPushDescriptorSetWithTemplateKHR(CommandBuffer, MeshProgram.DescriptorTemplate, MeshProgram.Layout, 0, DescriptorInfo);
+				vkCmdBindIndexBuffer(CommandBuffer, IndexBuffer.Handle, 0, VK_INDEX_TYPE_UINT32);
+
+				vkCmdPushConstants(CommandBuffer, MeshProgram.Layout, MeshProgram.Stages, 0, sizeof(globals), &Globals);
+				vkCmdDrawIndexedIndirectCountKHR(CommandBuffer, DrawCommandBuffer.Handle, offsetof(mesh_draw_command, DrawCommand), DrawCommandCountBuffer.Handle, 0, DrawCount, sizeof(mesh_draw_command));
+			}
+
 			vkCmdEndRenderPass(CommandBuffer);
 		}
 
@@ -987,7 +1148,7 @@ WinMain(HINSTANCE CurrInst,
 			BlitRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 			BlitRegion.dstSubresource.layerCount = 1;
 			BlitRegion.srcOffsets[0] = {0, 0, 0};
-			BlitRegion.srcOffsets[1] = {s32(max(1, (Swapchain.Width / 2) >> VisualizedPyramidLevel)), s32(max(1, (Swapchain.Height / 2) >> VisualizedPyramidLevel)), 1};
+			BlitRegion.srcOffsets[1] = {s32(max(1, (DepthPyramidWidth) >> VisualizedPyramidLevel)), s32(max(1, (DepthPyramidHeight) >> VisualizedPyramidLevel)), 1};
 			BlitRegion.dstOffsets[0] = {0, 0, 0};
 			BlitRegion.dstOffsets[1] = {s32(Swapchain.Width), s32(Swapchain.Height), 1};
 
@@ -1001,6 +1162,7 @@ WinMain(HINSTANCE CurrInst,
 			ImageCopyRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 			ImageCopyRegion.dstSubresource.layerCount = 1;
 			ImageCopyRegion.extent = {Swapchain.Width, Swapchain.Height, 1};
+
 			vkCmdCopyImage(CommandBuffer, ColorTarget.Handle, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, Swapchain.Images[ImageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &ImageCopyRegion);
 		}
 
@@ -1048,11 +1210,12 @@ WinMain(HINSTANCE CurrInst,
 		CpuAvgTime = CpuAvgTime * 0.75f + ((float)(EndTime.QuadPart - BegTime.QuadPart) / (float)TimeFreq.QuadPart * 1000.0f) * 0.25f;
 		GpuAvgTime = GpuAvgTime * 0.75f + ((float)(TimeResults[1] - TimeResults[0]) * (float)Props.limits.timestampPeriod * 1.e-6f) * 0.25f;
 
-		char Title[256];
-		sprintf(Title, "%s; %s; %s; Vulkan Engine - cpu: %.2f ms, gpu: %.2f ms; %0.2f cpu FPS; %0.2f gpu FPS; %llu triangles; %llu meshlets", 
+		char Title[512];
+		sprintf(Title, "%s; %s; %s; %s; Vulkan Engine - cpu: %.2f ms, gpu: %.2f ms; %0.2f cpu FPS; %0.2f gpu FPS; %llu triangles; %llu meshlets", 
 				IsRtxEnabled ? "RTX Is Enabled" : "RTX Is Disabled",
 				IsCullEnabled == 1 ? "Cull Is Enabled" : "Cull Is Disabled",
 				IsLodEnabled == 1 ? "Lod Is Enabled" : "Lod Is Disabled",
+				IsOcclusionEnabled == 1 ? "Occl Is Enabled" : "Occl Is Disabled",
 				CpuAvgTime, 
 			    GpuAvgTime,
 				1.0f / (CpuAvgTime) * 1000.0f,
@@ -1070,9 +1233,12 @@ WinMain(HINSTANCE CurrInst,
 	}
 
 	vkDestroyFramebuffer(Device, TargetFramebuffer, 0);
-	DestroyImage(DepthPyramid, Device);
-	DestroyImage(ColorTarget, Device);
-	DestroyImage(DepthTarget, Device);
+	if(DepthPyramid.Handle)
+		DestroyImage(DepthPyramid, Device);
+	if(ColorTarget.View)
+		DestroyImage(ColorTarget, Device);
+	if(DepthTarget.View)
+		DestroyImage(DepthTarget, Device);
 
 	if(IsRtxSupported)
 	{
@@ -1103,8 +1269,11 @@ WinMain(HINSTANCE CurrInst,
 	vkDestroyPipeline(Device, DepthReducePipeline, 0);
 	DeleteProgram(DepthReduceProgram, Device);
 
-	vkDestroyPipeline(Device, DrawCmdPipeline, 0);
-	DeleteProgram(ComputeProgram, Device);
+	vkDestroyPipeline(Device, DrawCullCmdPipeline, 0);
+	DeleteProgram(DrawCullComputeProgram, Device);
+
+	vkDestroyPipeline(Device, DrawCullateCmdPipeline, 0);
+	DeleteProgram(DrawCullateComputeProgram, Device);
 
 	vkDestroyPipeline(Device, MeshPipeline, 0);
 	DeleteProgram(MeshProgram, Device);
@@ -1119,7 +1288,8 @@ WinMain(HINSTANCE CurrInst,
 	}
 
 	vkDestroyShaderModule(Device, DepthReduceComputeShader.Handle, 0);
-	vkDestroyShaderModule(Device, CommandComputeShader.Handle, 0);
+	vkDestroyShaderModule(Device, DrawCullCommandComputeShader.Handle, 0);
+	vkDestroyShaderModule(Device, DrawCullateCommandComputeShader.Handle, 0);
 	vkDestroyShaderModule(Device, ObjectFragmentShader.Handle, 0);
 	vkDestroyShaderModule(Device, ObjectVertexShader.Handle, 0);
 
@@ -1185,6 +1355,10 @@ DispatchMessages()
 					if(KeyCode == 'R')
 					{
 						IsRtxEnabled = !IsRtxEnabled;
+					}
+					if(KeyCode == 'O')
+					{
+						IsOcclusionEnabled = !IsOcclusionEnabled;
 					}
 					if(KeyCode == 'L')
 					{

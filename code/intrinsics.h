@@ -66,10 +66,12 @@ global_variable bool IsRtxSupported;
 global_variable bool IsRtxEnabled;
 global_variable bool IsLodEnabled = true;
 global_variable bool IsCullEnabled = true;
+global_variable bool IsOcclusionEnabled = true;
 global_variable bool IsPyramidVisualized;
 global_variable u32 VisualizedPyramidLevel;
 global_variable u32 LastVisualizedPyramidLevel;
 global_variable u32 GlobalDepthPyramidLevels;
+
 
 struct shader_layout 
 {
