@@ -1,10 +1,5 @@
 
-struct vertex
-{
-	float16_t vx, vy, vz;
-	uint norm;
-	float16_t tu, tv;
-};
+#include "mesh_headers.hlsl"
 
 struct VsOutput
 {
@@ -12,11 +7,21 @@ struct VsOutput
 	float4 Color : COLOR;
 };
 
-StructuredBuffer<vertex> VertexBuffer;
+[[vk::binding(0)]] StructuredBuffer<mesh_offset> MeshOffsetBuffer;
+[[vk::binding(1)]] StructuredBuffer<mesh_draw_command> DrawCommands;
+[[vk::binding(2)]] StructuredBuffer<vertex> VertexBuffer;
+[[vk::push_constant]] ConstantBuffer<globals> Globals;
 
-VsOutput main(uint VertexIndex:SV_VertexID)
+VsOutput main([[vk::builtin("DrawIndex")]] int DrawIndex : A, uint VertexIndex:SV_VertexID)
 {
-	vertex Vertex = VertexBuffer.Load(VertexIndex);
+	mesh_offset MeshOffsetData = MeshOffsetBuffer[DrawCommands[DrawIndex].DrawIndex];
+
+	vertex Vertex = VertexBuffer[VertexIndex];
+	float3 DrawOffset = MeshOffsetData.Pos;
+	float3 DrawScale  = float3(MeshOffsetData.Scale, MeshOffsetData.Scale, 1);
+	float4x4 Projection = Globals.Proj;
+	float4 Orientation = MeshOffsetData.Orient;
+
 	float3 Position = float3(Vertex.vx, Vertex.vy, Vertex.vz);
 	uint nx, ny, nz;
 	nx = (Vertex.norm & 0xff000000) >> 24;
@@ -26,7 +31,7 @@ VsOutput main(uint VertexIndex:SV_VertexID)
 	float2 TexCoord = float2(Vertex.tu, Vertex.tv);
 
 	VsOutput Output;
-	Output.Position = float4(Position + float3(0, 0, 0.5), 1.0);
+	Output.Position = mul(Projection, float4(RotateQuat(Position, Orientation) * DrawScale + DrawOffset, 1.0));
 	Output.Color = float4(Normal * 0.5 + float3(0.5, 0.5, 0.5), 1.0f);
 	return Output;
 }
